@@ -23,6 +23,8 @@ export interface Submission {
   appealReason?: string;
   appealTimestamp?: string;
   isHidden?: boolean;
+  fullName?: string;
+  className?: string;
 }
 
 export interface PendingKey {

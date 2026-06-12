@@ -1,6 +1,7 @@
-import { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { UploadCloud, CheckCircle, FileSpreadsheet, RefreshCw, AlertCircle, Scan, Trash2, KeyRound, ImageIcon, Settings } from 'lucide-react';
 import { cn, exportToCSV } from '../lib/utils';
+import { apiFetch } from '../lib/api';
 import { Submission } from '../../server/db'; 
 import * as xlsx from 'xlsx';
 import mammoth from 'mammoth';
@@ -32,10 +33,10 @@ export default function AdminDashboard() {
   const fetchState = async () => {
     try {
       const [keysRes, subRes, pendingRes, setRes] = await Promise.all([
-        fetch('/api/admin/keys').then(r => r.json()),
-        fetch('/api/admin/submissions').then(r => r.json()),
-        fetch('/api/admin/keys/pending').then(r => r.json()),
-        fetch('/api/admin/settings').then(r => r.json()),
+        apiFetch('/api/admin/keys').then(r => r.json()),
+        apiFetch('/api/admin/submissions').then(r => r.json()),
+        apiFetch('/api/admin/keys/pending').then(r => r.json()),
+        apiFetch('/api/admin/settings').then(r => r.json()),
       ]);
       setKeysCount(Object.keys(keysRes.keys || {}).length);
       setSubmissions(subRes.submissions || []);
@@ -77,7 +78,7 @@ export default function AdminDashboard() {
             }
 
             // Call API to parse unstructured text
-            const res = await fetch('/api/admin/parse-key', {
+            const res = await apiFetch('/api/admin/parse-key', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ rawText })
@@ -95,7 +96,7 @@ export default function AdminDashboard() {
     }
     
     try {
-       await fetch('/api/admin/keys', {
+       await apiFetch('/api/admin/keys', {
          method: 'POST',
          headers: { 'Content-Type': 'application/json' },
          body: JSON.stringify({ keys: newKeysDict })
@@ -108,7 +109,7 @@ export default function AdminDashboard() {
   const handleImagesUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
-    const newItems: QueueItem[] = Array.from(files).map((file, idx) => ({
+    const newItems: QueueItem[] = Array.from(files).map((file: File, idx) => ({
       id: `${Date.now()}_${idx}`, file, previewUrl: URL.createObjectURL(file), status: 'idle'
     }));
     setQueue(prev => [...prev, ...newItems]);
@@ -124,7 +125,7 @@ export default function AdminDashboard() {
         reader.readAsDataURL(item.file);
       });
       
-      const orientRes = await fetch('/api/detect-orientation', {
+      const orientRes = await apiFetch('/api/detect-orientation', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ imageBase64: base64Str }),
       }).then(r => r.json());
       
@@ -151,7 +152,7 @@ export default function AdminDashboard() {
         });
       }
 
-      const extRes = await fetch('/api/extract-sheet', {
+      const extRes = await apiFetch('/api/extract-sheet', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ imageBase64: finalBase64 }),
       }).then(r => r.json());
 
@@ -177,7 +178,7 @@ export default function AdminDashboard() {
   };
   
   const handleResolveAppeal = async (id: string) => {
-    await fetch('/api/admin/appeal-resolve', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
+    await apiFetch('/api/admin/appeal-resolve', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
     fetchState();
   }
 
@@ -186,7 +187,7 @@ export default function AdminDashboard() {
     if (input === null) return;
     const score = parseFloat(input);
     if (!isNaN(score) && score >= 0 && score <= 10) {
-       await fetch(`/api/admin/submissions/${id}/edit-score`, { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({score}) });
+       await apiFetch(`/api/admin/submissions/${id}/edit-score`, { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({score}) });
        fetchState();
     } else {
        alert('Điểm không hợp lệ');
@@ -194,23 +195,23 @@ export default function AdminDashboard() {
   };
 
   const handleToggleHide = async (id: string) => {
-    await fetch(`/api/admin/submissions/${id}/toggle-hide`, { method: 'POST', headers:{'Content-Type':'application/json'} });
+    await apiFetch(`/api/admin/submissions/${id}/toggle-hide`, { method: 'POST', headers:{'Content-Type':'application/json'} });
     fetchState();
   };
 
   const handleApproveKey = async (id: string) => {
-    await fetch('/api/admin/keys/approve', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
+    await apiFetch('/api/admin/keys/approve', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
     fetchState();
   }
 
   const handleRejectKey = async (id: string) => {
-    await fetch('/api/admin/keys/reject', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
+    await apiFetch('/api/admin/keys/reject', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
     fetchState();
   }
 
   const handleUpdateSettings = async (e: React.FormEvent) => {
     e.preventDefault();
-    await fetch('/api/admin/settings', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(settings)});
+    await apiFetch('/api/admin/settings', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(settings)});
     alert('Settings compiled successfully');
   }
 
@@ -244,7 +245,7 @@ export default function AdminDashboard() {
                 <p className="text-sm font-medium text-neutral-800 mb-2">Đang có <span className="text-indigo-600 text-lg">{keysCount}</span> mã đề trên hệ thống</p>
                 <div className="flex gap-2 justify-center">
                   <button onClick={() => keyInputRef.current?.click()} className="px-3 py-1.5 bg-neutral-100 text-neutral-700 rounded-lg hover:bg-neutral-200 transition text-sm font-medium">Tải lên file Đáp án (.json, .txt, .csv, .docx, .xlsx)</button>
-                  <button onClick={async () => { await fetch('/api/admin/keys', {method:'POST', body:JSON.stringify({keys:{}}), headers:{'Content-Type':'application/json'}}); fetchState(); }} className="px-3 py-1.5 border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition text-sm font-medium">Xóa tất cả</button>
+                  <button onClick={async () => { await apiFetch('/api/admin/keys', {method:'POST', body:JSON.stringify({keys:{}}), headers:{'Content-Type':'application/json'}}); fetchState(); }} className="px-3 py-1.5 border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition text-sm font-medium">Xóa tất cả</button>
                 </div>
             </div>
             {keyError && <p className="text-xs text-red-600 mt-1 whitespace-pre-wrap">{keyError}</p>}

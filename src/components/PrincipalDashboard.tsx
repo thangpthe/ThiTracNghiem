@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { LayoutDashboard, Users, BookOpen, GraduationCap, TrendingUp } from 'lucide-react';
+import { apiFetch } from '../lib/api';
 
 interface ClassStat {
   className: string;
@@ -19,7 +20,7 @@ export default function PrincipalDashboard() {
   const [stats, setStats] = useState<PrincipalStats | null>(null);
 
   useEffect(() => {
-    fetch('/api/principal/stats')
+    apiFetch('/api/principal/stats')
       .then(r => r.json())
       .then(data => {
         if (data.success) {

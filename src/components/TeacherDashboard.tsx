@@ -1,6 +1,7 @@
-import { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { UploadCloud, CheckCircle, RefreshCw, AlertCircle, KeyRound, Clock, Users, BookOpen } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { apiFetch } from '../lib/api';
 import * as xlsx from 'xlsx';
 import mammoth from 'mammoth';
 
@@ -16,8 +17,8 @@ export default function TeacherDashboard({ user }: { user: any }) {
   const fetchState = async () => {
     try {
       const [histRes, statRes] = await Promise.all([
-        fetch(`/api/teacher/keys/history/${user.cccd}`).then(r => r.json()),
-        fetch(`/api/teacher/stats/${user.cccd}`).then(r => r.json()),
+        apiFetch(`/api/teacher/keys/history/${user.cccd}`).then(r => r.json()),
+        apiFetch(`/api/teacher/stats/${user.cccd}`).then(r => r.json()),
       ]);
       setPendingKeys(histRes.pendingKeys || []);
       setStats(statRes);
@@ -56,7 +57,7 @@ export default function TeacherDashboard({ user }: { user: any }) {
                   rawText = await file.text();
               }
               
-              const res = await fetch('/api/admin/parse-key', {
+              const res = await apiFetch('/api/admin/parse-key', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ rawText })
@@ -68,7 +69,7 @@ export default function TeacherDashboard({ user }: { user: any }) {
            }
            
            if (parsedKey && Object.keys(parsedKey).length > 0) {
-              await fetch('/api/teacher/keys/submit', {
+              await apiFetch('/api/teacher/keys/submit', {
                  method: 'POST',
                  headers: { 'Content-Type': 'application/json' },
                  body: JSON.stringify({ testCode, keyData: parsedKey, teacherId: user.cccd })

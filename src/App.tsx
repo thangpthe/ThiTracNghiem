@@ -1,14 +1,16 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import AdminDashboard from './components/AdminDashboard';
-import StudentDashboard from './components/StudentDashboard';
 import PrincipalDashboard from './components/PrincipalDashboard';
 import TeacherDashboard from './components/TeacherDashboard';
-import { ScanFace, Lock, AlertCircle } from 'lucide-react';
+import PublicScoreLookup from './components/PublicScoreLookup';
+import { ScanFace, Lock, AlertCircle, ArrowRight } from 'lucide-react';
 import { cn } from './lib/utils';
-import { User } from '../server/db'; // We'll just define a subset type locally if it fails
+import { apiFetch } from './lib/api';
+import { User } from '../server/db';
 
 export default function App() {
-  const [role, setRole] = useState<'student' | 'teacher' | 'admin' | 'principal'>('student');
+  const [viewMode, setViewMode] = useState<'lookup' | 'dashboard'>('lookup');
+  const [role, setRole] = useState<'teacher' | 'admin' | 'principal'>('teacher');
   const [user, setUser] = useState<{ cccd: string; name: string; role: string; assignedClass?: string } | null>(null);
   
   // Login State
@@ -23,23 +25,17 @@ export default function App() {
         const u = JSON.parse(userStr);
         setUser(u);
         setRole(u.role as any);
+        setViewMode('dashboard');
       } catch(e) {}
     }
   }, []);
 
   const handleRoleSelect = (selectedRole: typeof role) => {
     setRole(selectedRole);
-    if (selectedRole === 'student') {
-       setUser(null); // Students don't need CCCD auth
-       setCccd('');
-       setError('');
-    } else {
-       // If switching to a restricted role, require login if not already logged in as that role
-       if (user?.role !== selectedRole) {
-          setUser(null);
-          setCccd('');
-          setError('');
-       }
+    if (user?.role !== selectedRole) {
+      setUser(null);
+      setCccd('');
+      setError('');
     }
   };
 
@@ -48,7 +44,7 @@ export default function App() {
     setError('');
     setLoading(true);
     try {
-      const res = await fetch('/api/auth/login', {
+      const res = await apiFetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cccd })
@@ -58,8 +54,9 @@ export default function App() {
         if (data.user.role !== role) {
            setError(`CCCD này dành cho ${data.user.role}, không phải ${role}.`);
         } else {
-           setUser(data.user);
-           localStorage.setItem('vision_grader_user', JSON.stringify(data.user));
+           const sessionUser = { ...data.user, token: data.token };
+           setUser(sessionUser);
+           localStorage.setItem('vision_grader_user', JSON.stringify(sessionUser));
         }
       } else {
         setError(data.error);
@@ -76,11 +73,15 @@ export default function App() {
     localStorage.removeItem('vision_grader_user');
   };
 
+  if (viewMode === 'lookup') {
+     return <PublicScoreLookup onGoToLogin={() => setViewMode('dashboard')} />;
+  }
+
   return (
     <div className="min-h-screen bg-neutral-50/50 text-neutral-900 font-sans selection:bg-indigo-100 selection:text-indigo-900">
       <header className="bg-white border-b border-neutral-200 sticky top-0 z-10 shadow-sm shadow-black/[0.02]">
         <div className="max-w-6xl mx-auto px-4 md:px-6 py-4 flex flex-col md:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-2.5 text-indigo-600">
+          <div className="flex items-center gap-2.5 text-indigo-600 cursor-pointer" onClick={() => setViewMode('lookup')}>
             <div className="p-1.5 bg-indigo-50 rounded-lg">
               <ScanFace className="w-6 h-6 stroke-[2.5]" />
             </div>
@@ -89,15 +90,6 @@ export default function App() {
           
           <div className="flex items-center gap-4">
             <div className="flex bg-neutral-100 p-1 rounded-lg overflow-x-auto w-full md:w-auto">
-              <button
-                onClick={() => handleRoleSelect('student')}
-                className={cn(
-                  "px-3 py-1.5 text-sm font-medium rounded-md transition-all whitespace-nowrap",
-                  role === 'student' ? "bg-white shadow-sm text-neutral-900" : "text-neutral-500 hover:text-neutral-700"
-                )}
-              >
-                Học sinh
-              </button>
               <button
                 onClick={() => handleRoleSelect('teacher')}
                 className={cn(
@@ -131,16 +123,17 @@ export default function App() {
       </header>
       
       <main className="max-w-6xl mx-auto px-4 md:px-6 py-8 md:py-12">
-        {role === 'student' && <StudentDashboard />}
-        
-        {role !== 'student' && !user && (
-           <div className="max-w-md mx-auto mt-10 p-8 bg-white border border-neutral-200 rounded-2xl shadow-sm">
-             <div className="flex flex-col items-center text-center mb-6">
+        {!user && (
+           <div className="max-w-md mx-auto mt-10 p-8 bg-white border border-neutral-200 rounded-2xl shadow-sm relative">
+             <button onClick={() => setViewMode('lookup')} className="absolute top-4 left-4 text-xs font-medium text-neutral-500 hover:text-neutral-900 flex items-center gap-1">
+               &larr; Quay lại
+             </button>
+             <div className="flex flex-col items-center text-center mt-4 mb-6">
                 <div className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center mb-3">
                   <Lock className="w-6 h-6" />
                 </div>
                 <h2 className="text-xl font-bold text-neutral-900">Xác thực Định danh</h2>
-                <p className="text-sm text-neutral-500 mt-1">Sử dụng số CCCD của bạn để đăng nhập vào phân hệ {role === 'admin' ? 'Quản trị (Admin)' : role === 'teacher' ? 'Giáo viên' : 'Hiệu trưởng'}.</p>
+                <p className="text-sm text-neutral-500 mt-1">Sử dụng số CCCD của bạn để đăng nhập vào phân hệ {role === 'admin' ? 'Quản trị' : role === 'teacher' ? 'Giáo viên' : 'Hiệu trưởng'}.</p>
                 <div className="text-[11px] text-neutral-400 mt-2 bg-neutral-50 p-2 rounded w-full text-left">
                   <strong>CCCD thử nghiệm:</strong><br/>
                   - Admin: 000000000001<br/>

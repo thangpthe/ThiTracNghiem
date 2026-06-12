@@ -6,11 +6,16 @@ import dotenv from 'dotenv';
 import fs from 'fs';
 import { readDB, writeDB, cleanupOldRecords, UPLOADS_DIR } from './server/db';
 import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
+import lockfile from 'proper-lockfile';
 
 dotenv.config();
 
 const app = express();
 const PORT = 3000;
+
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
+const loginAttempts = new Map<string, { count: number, resetAt: number }>();
 
 // Serve uploaded images securely
 app.use('/uploads', express.static(UPLOADS_DIR));
@@ -33,15 +38,27 @@ setInterval(cleanupOldRecords, 1000 * 60 * 60 * 12); // every 12 hours
 
 function requireRole(roles: string[]) {
   return (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const cccd = req.headers['x-auth-cccd'] as string;
-    if (!cccd) return res.status(401).json({ error: 'Unauthorized: Missing CCCD header' });
-    const db = readDB();
-    const user = db.users.find(u => u.cccd === cccd);
-    if (!user || !roles.includes(user.role)) {
-      return res.status(403).json({ error: 'Forbidden: Invalid role' });
+    let token = req.headers['authorization']?.split(' ')[1];
+    if (!token) {
+      token = req.headers['x-auth-token'] as string;
     }
-    (req as any).user = user;
-    next();
+    if (!token) return res.status(401).json({ error: 'Unauthorized: Missing token' });
+
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET) as any;
+      if (!roles.includes(decoded.role)) {
+        return res.status(403).json({ error: 'Forbidden: Invalid role' });
+      }
+      
+      const db = readDB();
+      const user = db.users.find(u => u.cccd === decoded.cccd);
+      if (!user) return res.status(401).json({ error: 'User no longer exists' });
+      
+      (req as any).user = user;
+      next();
+    } catch (err) {
+      return res.status(401).json({ error: 'Unauthorized: Invalid token' });
+    }
   };
 }
 
@@ -65,23 +82,57 @@ function regradeSubmissions(db: any, testCode: string) {
          if (isCorrect) correctCount++;
          newResults.push({ questionNumber: qNum, extractedAnswer: extAns, correctAnswer: correctAns, isCorrect });
       }
+      
+      if (sub.status !== 'graded') {
+        // Skip modifying score/results if appeal_pending or appeal_resolved to preserve manual interventions
+        continue;
+      }
+      
       sub.results = newResults;
       sub.correctCount = correctCount;
       sub.totalQuestions = totalQuestions;
       sub.score = Math.round((correctCount / totalQuestions) * 10 * 100) / 100;
-      // Do not override 'appeal_pending' or 'appeal_resolved' if we want to preserve them, but we could set it to graded. Let's just update score.
     }
+  }
+}
+
+// --- DB FILE LOCK WRAPPER ---
+async function withDBLock(action: (db: any) => void) {
+  const filePath = path.resolve('data/db.json');
+  let release;
+  try {
+    if (!fs.existsSync('data')) fs.mkdirSync('data');
+    if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, JSON.stringify({}));
+    release = await lockfile.lock(filePath, { retries: { retries: 10, minTimeout: 100, maxTimeout: 1000 } });
+    const db = readDB();
+    action(db);
+    writeDB(db);
+  } finally {
+    if (release) await release();
   }
 }
 
 // --- AUTH APIs ---
 app.post('/api/auth/login', (req, res) => {
+  const ip = req.ip || req.connection?.remoteAddress || 'unknown';
+  const limit = loginAttempts.get(ip);
+  if (limit && limit.count >= 10 && limit.resetAt > Date.now()) {
+    return res.status(429).json({ error: 'Quá nhiều yêu cầu đăng nhập. Thử lại sau 5 phút.' });
+  }
+
   const { cccd } = req.body;
   const db = readDB();
   const user = db.users.find(u => u.cccd === cccd);
   if (user) {
-    res.json({ success: true, user });
+    if (limit) loginAttempts.delete(ip);
+    const token = jwt.sign({ cccd: user.cccd, role: user.role }, JWT_SECRET, { expiresIn: '12h' });
+    res.json({ success: true, user, token });
   } else {
+    if (!limit || limit.resetAt < Date.now()) {
+      loginAttempts.set(ip, { count: 1, resetAt: Date.now() + 5 * 60 * 1000 });
+    } else {
+      limit.count += 1;
+    }
     res.json({ success: false, error: 'CCCD không hợp lệ hoặc không có quyền truy cập.' });
   }
 });
@@ -93,19 +144,22 @@ app.get('/api/admin/keys', requireRole(['admin', 'teacher', 'principal']), (req,
   res.json({ success: true, keys: db.answerKeys });
 });
 
-app.post('/api/admin/keys', requireRole(['admin']), (req, res) => {
+app.post('/api/admin/keys', requireRole(['admin']), async (req, res) => {
   const { keys } = req.body;
-  const db = readDB();
   const safeKeys: any = {};
   for (const k in keys) {
      const safeK = k.replace(/[^a-zA-Z0-9_-]/g, '');
      if (safeK) safeKeys[safeK] = keys[k];
   }
-  db.answerKeys = safeKeys; // or merge depending on your usage, UI sends empty to clear all
-  for (const k in safeKeys) {
-     regradeSubmissions(db, k);
-  }
-  writeDB(db);
+  
+  await withDBLock((db) => {
+    db.answerKeys = safeKeys;
+    for (const k in safeKeys) {
+       regradeSubmissions(db, k);
+    }
+  });
+  
+  const db = readDB();
   res.json({ success: true, keys: db.answerKeys });
 });
 
@@ -114,28 +168,40 @@ app.get('/api/admin/keys/pending', requireRole(['admin']), (req, res) => {
   res.json({ success: true, pendingKeys: (db.pendingKeys || []).filter(k => k.status === 'pending') });
 });
 
-app.post('/api/admin/keys/approve', requireRole(['admin']), (req, res) => {
+app.post('/api/admin/keys/approve', requireRole(['admin']), async (req, res) => {
   const { id } = req.body;
-  const db = readDB();
-  const pk = (db.pendingKeys || []).find(k => k.id === id);
-  if (pk) {
-    pk.status = 'approved';
-    db.answerKeys[pk.testCode] = pk.keyData;
-    regradeSubmissions(db, pk.testCode);
-    writeDB(db);
+  let success = false;
+  
+  await withDBLock((db) => {
+    const pk = (db.pendingKeys || []).find((k: any) => k.id === id);
+    if (pk) {
+      pk.status = 'approved';
+      db.answerKeys[pk.testCode] = pk.keyData;
+      regradeSubmissions(db, pk.testCode);
+      success = true;
+    }
+  });
+
+  if (success) {
     res.json({ success: true });
   } else {
     res.status(404).json({ error: 'Not found' });
   }
 });
 
-app.post('/api/admin/keys/reject', requireRole(['admin']), (req, res) => {
+app.post('/api/admin/keys/reject', requireRole(['admin']), async (req, res) => {
   const { id } = req.body;
-  const db = readDB();
-  const pk = (db.pendingKeys || []).find(k => k.id === id);
-  if (pk) {
-    pk.status = 'rejected';
-    writeDB(db);
+  let success = false;
+  
+  await withDBLock((db) => {
+    const pk = (db.pendingKeys || []).find((k: any) => k.id === id);
+    if (pk) {
+      pk.status = 'rejected';
+      success = true;
+    }
+  });
+
+  if (success) {
     res.json({ success: true });
   } else {
     res.status(404).json({ error: 'Not found' });
@@ -144,20 +210,25 @@ app.post('/api/admin/keys/reject', requireRole(['admin']), (req, res) => {
 
 // --- TEACHER APIs ---
 
-app.post('/api/teacher/keys/submit', requireRole(['teacher']), (req, res) => {
+app.post('/api/teacher/keys/submit', requireRole(['teacher']), async (req, res) => {
   const { testCode, keyData, teacherId } = req.body;
+  if ((req as any).user.cccd !== teacherId) {
+    return res.status(403).json({ error: 'Forbidden: teacherId mismatch' });
+  }
   const safeTestCode = testCode.replace(/[^a-zA-Z0-9_-]/g, '');
-  const db = readDB();
-  db.pendingKeys = db.pendingKeys || [];
-  db.pendingKeys.push({
-    id: crypto.randomUUID(),
-    testCode: safeTestCode,
-    keyData,
-    teacherId,
-    status: 'pending',
-    timestamp: new Date().toISOString()
+  
+  await withDBLock((db) => {
+    db.pendingKeys = db.pendingKeys || [];
+    db.pendingKeys.push({
+      id: crypto.randomUUID(),
+      testCode: safeTestCode,
+      keyData,
+      teacherId,
+      status: 'pending',
+      timestamp: new Date().toISOString()
+    });
   });
-  writeDB(db);
+  
   res.json({ success: true });
 });
 
@@ -166,9 +237,15 @@ app.get('/api/teacher/keys/history/:teacherId', requireRole(['teacher']), (req, 
   res.json({ success: true, pendingKeys: (db.pendingKeys || []).filter(k => k.teacherId === req.params.teacherId) });
 });
 
-app.get('/api/teacher/stats/:teacherId', requireRole(['teacher']), (req, res) => {
+app.get('/api/teacher/stats/:teacherId', requireRole(['teacher', 'principal']), (req, res) => {
+  const teacherId = req.params.teacherId;
+  const user = (req as any).user;
+  if (user.role === 'teacher' && user.cccd !== teacherId) {
+     return res.status(403).json({error: 'Forbidden: Không được xem thông tin giáo viên khác'});
+  }
+  
   const db = readDB();
-  const teacher = db.users.find(u => u.cccd === req.params.teacherId);
+  const teacher = db.users.find(u => u.cccd === teacherId);
   if (!teacher || teacher.role !== 'teacher') return res.status(403).json({error: 'Hành động không được phép'});
   
   const assignedClass = teacher.assignedClass || 'Lớp 10';
@@ -212,28 +289,42 @@ app.get('/api/teacher/stats/:teacherId', requireRole(['teacher']), (req, res) =>
   });
 });
 
-app.post('/api/admin/submissions/:id/edit-score', requireRole(['admin']), (req, res) => {
+app.post('/api/admin/submissions/:id/edit-score', requireRole(['admin']), async (req, res) => {
   const { id } = req.params;
   const { score } = req.body;
-  const db = readDB();
-  const sub = db.submissions.find(s => s.id === id);
-  if (sub) {
-    sub.score = Number(score);
-    writeDB(db);
+  let success = false;
+  
+  await withDBLock((db) => {
+    const sub = db.submissions.find((s: any) => s.id === id);
+    if (sub) {
+      sub.score = Number(score);
+      success = true;
+    }
+  });
+  
+  if (success) {
     res.json({ success: true });
   } else {
     res.status(404).json({ error: 'Not found' });
   }
 });
 
-app.post('/api/admin/submissions/:id/toggle-hide', requireRole(['admin', 'teacher']), (req, res) => {
+app.post('/api/admin/submissions/:id/toggle-hide', requireRole(['admin', 'teacher']), async (req, res) => {
   const { id } = req.params;
-  const db = readDB();
-  const sub = db.submissions.find(s => s.id === id);
-  if (sub) {
-    sub.isHidden = !sub.isHidden;
-    writeDB(db);
-    res.json({ success: true, isHidden: sub.isHidden });
+  let isHidden = false;
+  let success = false;
+  
+  await withDBLock((db) => {
+    const sub = db.submissions.find((s: any) => s.id === id);
+    if (sub) {
+      sub.isHidden = !sub.isHidden;
+      isHidden = sub.isHidden;
+      success = true;
+    }
+  });
+  
+  if (success) {
+    res.json({ success: true, isHidden });
   } else {
     res.status(404).json({ error: 'Not found' });
   }
@@ -246,13 +337,19 @@ app.get('/api/admin/submissions', requireRole(['admin', 'teacher']), (req, res) 
   res.json({ success: true, submissions: db.submissions });
 });
 
-app.post('/api/admin/appeal-resolve', requireRole(['admin']), (req, res) => {
+app.post('/api/admin/appeal-resolve', requireRole(['admin']), async (req, res) => {
   const { id } = req.body;
-  const db = readDB();
-  const sub = db.submissions.find(s => s.id === id);
-  if (sub) {
-    sub.status = 'appeal_resolved';
-    writeDB(db);
+  let success = false;
+  
+  await withDBLock((db) => {
+    const sub = db.submissions.find((s: any) => s.id === id);
+    if (sub) {
+      sub.status = 'appeal_resolved';
+      success = true;
+    }
+  });
+  
+  if (success) {
     res.json({ success: true });
   } else {
     res.status(404).json({ error: 'Submission not found' });
@@ -264,11 +361,13 @@ app.get('/api/admin/settings', requireRole(['admin']), (req, res) => {
   res.json({ success: true, settings: db.settings });
 });
 
-app.post('/api/admin/settings', requireRole(['admin']), (req, res) => {
-  const db = readDB();
-  db.settings = { ...db.settings, ...req.body };
-  writeDB(db);
-  res.json({ success: true, settings: db.settings });
+app.post('/api/admin/settings', requireRole(['admin']), async (req, res) => {
+  let latestSettings = {};
+  await withDBLock((db) => {
+    db.settings = { ...db.settings, ...req.body };
+    latestSettings = db.settings;
+  });
+  res.json({ success: true, settings: latestSettings });
 });
 
 app.get('/api/principal/stats', requireRole(['principal']), (req, res) => {
@@ -472,15 +571,21 @@ app.post('/api/extract-sheet', requireRole(['admin', 'teacher']), async (req, re
         status: 'graded' as const
       };
       
-      const existingSubmissionIndex = db.submissions.findIndex(s => String(s.studentId) === String(newSubmission.studentId) && String(s.testCode) === String(newSubmission.testCode));
-      if (existingSubmissionIndex >= 0) {
-        newSubmission.id = db.submissions[existingSubmissionIndex].id; // Keep same ID so frontend keys don't break if dependent
-        db.submissions[existingSubmissionIndex] = newSubmission;
-      } else {
-        db.submissions.unshift(newSubmission);
-      }
+      let hasConflict = false;
+      await withDBLock((dbLockInstance) => {
+        const existingSubmissionIndex = dbLockInstance.submissions.findIndex((s: any) => String(s.studentId) === String(newSubmission.studentId) && String(s.testCode) === String(newSubmission.testCode));
+        if (existingSubmissionIndex >= 0) {
+          hasConflict = true;
+          // Delete the newly uploaded image since we won't save it
+          try { fs.unlinkSync(path.join(UPLOADS_DIR, imageFileName)); } catch (e) {}
+        } else {
+          dbLockInstance.submissions.unshift(newSubmission);
+        }
+      });
       
-      writeDB(db);
+      if (hasConflict) {
+        return res.json({ success: false, graded: false, error: `Trùng lặp: Học sinh ${newSubmission.studentId} đã có điểm cho mã đề ${newSubmission.testCode}. Vui lòng kiểm tra lại thủ công.` });
+      }
       
       res.json({ success: true, graded: true, data: newSubmission });
     } else {
@@ -497,6 +602,28 @@ app.post('/api/extract-sheet', requireRole(['admin', 'teacher']), async (req, re
 });
 
 // --- STUDENT APIs ---
+
+app.get('/api/public/result', (req, res) => {
+  const { studentId, testCode } = req.query;
+  if (!studentId || !testCode) {
+    return res.status(400).json({ success: false, error: 'Thiếu số báo danh hoặc mã đề' });
+  }
+
+  const db = readDB();
+  const sub = db.submissions.find(s => String(s.studentId) === String(studentId) && String(s.testCode) === String(testCode));
+  if (!sub) {
+    return res.json({ success: false, error: 'Không tìm thấy kết quả cho thông tin này' });
+  }
+  if (sub.isHidden) {
+    return res.json({ success: false, error: 'Kết quả của bạn đang được ẩn theo yêu cầu của giáo viên.' });
+  }
+  
+  // Calculate if within appeal window
+  const appealTimeMs = db.settings.appealWindowDays * 24 * 60 * 60 * 1000;
+  const isWithinWindow = (new Date().getTime() - new Date(sub.timestamp).getTime()) <= appealTimeMs;
+  
+  res.json({ success: true, submission: sub, isWithinWindow });
+});
 
 app.get('/api/student/result/:studentId', (req, res) => {
   const { studentId } = req.params;
@@ -516,26 +643,37 @@ app.get('/api/student/result/:studentId', (req, res) => {
   res.json({ success: true, submission: sub, isWithinWindow });
 });
 
-app.post('/api/student/appeal', (req, res) => {
-  const { id, reason } = req.body;
-  const db = readDB();
-  const index = db.submissions.findIndex(s => s.id === id);
-  if (index >= 0) {
-    const sub = db.submissions[index];
-    const appealTimeMs = db.settings.appealWindowDays * 24 * 60 * 60 * 1000;
-    const isWithinWindow = (new Date().getTime() - new Date(sub.timestamp).getTime()) <= appealTimeMs;
-    
-    if (isWithinWindow && sub.status === 'graded') {
-      db.submissions[index].status = 'appeal_pending';
-      db.submissions[index].appealReason = reason;
-      db.submissions[index].appealTimestamp = new Date().toISOString();
-      writeDB(db);
-      res.json({ success: true, submission: db.submissions[index] });
-    } else {
-      res.status(400).json({ error: 'Không thể phúc khảo' });
+app.post('/api/student/appeal', async (req, res) => {
+  const { id, reason, fullName, className } = req.body;
+  let appealResolved = false;
+  let updatedSub = null;
+  let errorMsg = null;
+  
+  await withDBLock((db) => {
+    const index = db.submissions.findIndex((s: any) => s.id === id);
+    if (index >= 0) {
+      const sub = db.submissions[index];
+      const appealTimeMs = db.settings.appealWindowDays * 24 * 60 * 60 * 1000;
+      const isWithinWindow = (new Date().getTime() - new Date(sub.timestamp).getTime()) <= appealTimeMs;
+      
+      if (isWithinWindow && sub.status === 'graded') {
+        db.submissions[index].status = 'appeal_pending';
+        db.submissions[index].appealReason = reason;
+        db.submissions[index].fullName = fullName;
+        db.submissions[index].className = className;
+        db.submissions[index].appealTimestamp = new Date().toISOString();
+        updatedSub = db.submissions[index];
+        appealResolved = true;
+      } else {
+        errorMsg = 'Không thể phúc khảo (đã hết hạn hoặc trạng thái không hợp lệ)';
+      }
     }
+  });
+  
+  if (appealResolved) {
+    res.json({ success: true, submission: updatedSub });
   } else {
-    res.status(404).json({ error: 'Not found' });
+    res.status(errorMsg ? 400 : 404).json({ error: errorMsg || 'Not found' });
   }
 });
 
