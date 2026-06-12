@@ -83,7 +83,9 @@ export function readDB(): Database {
 }
 
 export function writeDB(db: Database) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+  const tempFile = DB_FILE + '.tmp';
+  fs.writeFileSync(tempFile, JSON.stringify(db, null, 2));
+  fs.renameSync(tempFile, DB_FILE);
 }
 
 // Cleanup job that runs when called

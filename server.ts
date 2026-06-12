@@ -31,6 +31,49 @@ const ai = new GoogleGenAI({
 cleanupOldRecords();
 setInterval(cleanupOldRecords, 1000 * 60 * 60 * 12); // every 12 hours
 
+function requireRole(roles: string[]) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const cccd = req.headers['x-auth-cccd'] as string;
+    if (!cccd) return res.status(401).json({ error: 'Unauthorized: Missing CCCD header' });
+    const db = readDB();
+    const user = db.users.find(u => u.cccd === cccd);
+    if (!user || !roles.includes(user.role)) {
+      return res.status(403).json({ error: 'Forbidden: Invalid role' });
+    }
+    (req as any).user = user;
+    next();
+  };
+}
+
+function regradeSubmissions(db: any, testCode: string) {
+  const key = db.answerKeys[testCode];
+  if (!key) return;
+  const totalQuestions = Object.keys(key).length;
+  if (totalQuestions === 0) return;
+
+  for (const sub of db.submissions) {
+    if (sub.testCode === testCode) {
+      let correctCount = 0;
+      const newResults = [];
+      for (const [qNum, correctAns] of Object.entries(key)) {
+         const oldRes = sub.results.find((r: any) => r.questionNumber === qNum);
+         const extAns = oldRes ? oldRes.extractedAnswer : null;
+         let isCorrect = false;
+         if (extAns) {
+           isCorrect = String(extAns).toLowerCase().trim() === String(correctAns).toLowerCase().trim();
+         }
+         if (isCorrect) correctCount++;
+         newResults.push({ questionNumber: qNum, extractedAnswer: extAns, correctAnswer: correctAns, isCorrect });
+      }
+      sub.results = newResults;
+      sub.correctCount = correctCount;
+      sub.totalQuestions = totalQuestions;
+      sub.score = Math.round((correctCount / totalQuestions) * 10 * 100) / 100;
+      // Do not override 'appeal_pending' or 'appeal_resolved' if we want to preserve them, but we could set it to graded. Let's just update score.
+    }
+  }
+}
+
 // --- AUTH APIs ---
 app.post('/api/auth/login', (req, res) => {
   const { cccd } = req.body;
@@ -45,31 +88,40 @@ app.post('/api/auth/login', (req, res) => {
 
 // --- ADMIN APIs ---
 
-app.get('/api/admin/keys', (req, res) => {
+app.get('/api/admin/keys', requireRole(['admin', 'teacher', 'principal']), (req, res) => {
   const db = readDB();
   res.json({ success: true, keys: db.answerKeys });
 });
 
-app.post('/api/admin/keys', (req, res) => {
+app.post('/api/admin/keys', requireRole(['admin']), (req, res) => {
   const { keys } = req.body;
   const db = readDB();
-  db.answerKeys = keys;
+  const safeKeys: any = {};
+  for (const k in keys) {
+     const safeK = k.replace(/[^a-zA-Z0-9_-]/g, '');
+     if (safeK) safeKeys[safeK] = keys[k];
+  }
+  db.answerKeys = safeKeys; // or merge depending on your usage, UI sends empty to clear all
+  for (const k in safeKeys) {
+     regradeSubmissions(db, k);
+  }
   writeDB(db);
   res.json({ success: true, keys: db.answerKeys });
 });
 
-app.get('/api/admin/keys/pending', (req, res) => {
+app.get('/api/admin/keys/pending', requireRole(['admin']), (req, res) => {
   const db = readDB();
   res.json({ success: true, pendingKeys: (db.pendingKeys || []).filter(k => k.status === 'pending') });
 });
 
-app.post('/api/admin/keys/approve', (req, res) => {
+app.post('/api/admin/keys/approve', requireRole(['admin']), (req, res) => {
   const { id } = req.body;
   const db = readDB();
   const pk = (db.pendingKeys || []).find(k => k.id === id);
   if (pk) {
     pk.status = 'approved';
     db.answerKeys[pk.testCode] = pk.keyData;
+    regradeSubmissions(db, pk.testCode);
     writeDB(db);
     res.json({ success: true });
   } else {
@@ -77,7 +129,7 @@ app.post('/api/admin/keys/approve', (req, res) => {
   }
 });
 
-app.post('/api/admin/keys/reject', (req, res) => {
+app.post('/api/admin/keys/reject', requireRole(['admin']), (req, res) => {
   const { id } = req.body;
   const db = readDB();
   const pk = (db.pendingKeys || []).find(k => k.id === id);
@@ -92,13 +144,14 @@ app.post('/api/admin/keys/reject', (req, res) => {
 
 // --- TEACHER APIs ---
 
-app.post('/api/teacher/keys/submit', (req, res) => {
+app.post('/api/teacher/keys/submit', requireRole(['teacher']), (req, res) => {
   const { testCode, keyData, teacherId } = req.body;
+  const safeTestCode = testCode.replace(/[^a-zA-Z0-9_-]/g, '');
   const db = readDB();
   db.pendingKeys = db.pendingKeys || [];
   db.pendingKeys.push({
     id: crypto.randomUUID(),
-    testCode,
+    testCode: safeTestCode,
     keyData,
     teacherId,
     status: 'pending',
@@ -108,12 +161,12 @@ app.post('/api/teacher/keys/submit', (req, res) => {
   res.json({ success: true });
 });
 
-app.get('/api/teacher/keys/history/:teacherId', (req, res) => {
+app.get('/api/teacher/keys/history/:teacherId', requireRole(['teacher']), (req, res) => {
   const db = readDB();
   res.json({ success: true, pendingKeys: (db.pendingKeys || []).filter(k => k.teacherId === req.params.teacherId) });
 });
 
-app.get('/api/teacher/stats/:teacherId', (req, res) => {
+app.get('/api/teacher/stats/:teacherId', requireRole(['teacher']), (req, res) => {
   const db = readDB();
   const teacher = db.users.find(u => u.cccd === req.params.teacherId);
   if (!teacher || teacher.role !== 'teacher') return res.status(403).json({error: 'Hành động không được phép'});
@@ -159,7 +212,7 @@ app.get('/api/teacher/stats/:teacherId', (req, res) => {
   });
 });
 
-app.post('/api/admin/submissions/:id/edit-score', (req, res) => {
+app.post('/api/admin/submissions/:id/edit-score', requireRole(['admin']), (req, res) => {
   const { id } = req.params;
   const { score } = req.body;
   const db = readDB();
@@ -173,7 +226,7 @@ app.post('/api/admin/submissions/:id/edit-score', (req, res) => {
   }
 });
 
-app.post('/api/admin/submissions/:id/toggle-hide', (req, res) => {
+app.post('/api/admin/submissions/:id/toggle-hide', requireRole(['admin', 'teacher']), (req, res) => {
   const { id } = req.params;
   const db = readDB();
   const sub = db.submissions.find(s => s.id === id);
@@ -186,14 +239,14 @@ app.post('/api/admin/submissions/:id/toggle-hide', (req, res) => {
   }
 });
 
-app.get('/api/admin/submissions', (req, res) => {
+app.get('/api/admin/submissions', requireRole(['admin', 'teacher']), (req, res) => {
 
   const db = readDB();
   // Don't send full results array to save bandwidth if many, but we will send it for now
   res.json({ success: true, submissions: db.submissions });
 });
 
-app.post('/api/admin/appeal-resolve', (req, res) => {
+app.post('/api/admin/appeal-resolve', requireRole(['admin']), (req, res) => {
   const { id } = req.body;
   const db = readDB();
   const sub = db.submissions.find(s => s.id === id);
@@ -206,19 +259,19 @@ app.post('/api/admin/appeal-resolve', (req, res) => {
   }
 });
 
-app.get('/api/admin/settings', (req, res) => {
+app.get('/api/admin/settings', requireRole(['admin']), (req, res) => {
   const db = readDB();
   res.json({ success: true, settings: db.settings });
 });
 
-app.post('/api/admin/settings', (req, res) => {
+app.post('/api/admin/settings', requireRole(['admin']), (req, res) => {
   const db = readDB();
   db.settings = { ...db.settings, ...req.body };
   writeDB(db);
   res.json({ success: true, settings: db.settings });
 });
 
-app.get('/api/principal/stats', (req, res) => {
+app.get('/api/principal/stats', requireRole(['principal']), (req, res) => {
   const db = readDB();
   const submissions = db.submissions.filter((s:any) => !s.isHidden);
   
@@ -251,7 +304,7 @@ app.get('/api/principal/stats', (req, res) => {
   });
 });
 
-app.post('/api/admin/parse-key', async (req, res) => {
+app.post('/api/admin/parse-key', requireRole(['admin', 'teacher']), async (req, res) => {
   try {
     const { rawText } = req.body;
     if (!rawText) return res.status(400).json({ error: 'Text is required' });
@@ -289,7 +342,7 @@ app.post('/api/admin/parse-key', async (req, res) => {
   }
 });
 
-app.post('/api/detect-orientation', async (req, res) => {
+app.post('/api/detect-orientation', requireRole(['admin', 'teacher']), async (req, res) => {
   // Existing detect-orientation logic
   try {
     const { imageBase64 } = req.body;
@@ -325,7 +378,7 @@ app.post('/api/detect-orientation', async (req, res) => {
   }
 });
 
-app.post('/api/extract-sheet', async (req, res) => {
+app.post('/api/extract-sheet', requireRole(['admin', 'teacher']), async (req, res) => {
   try {
     const { imageBase64 } = req.body;
     if (!imageBase64) return res.status(400).json({ error: 'Image is required' });
@@ -372,9 +425,12 @@ app.post('/api/extract-sheet', async (req, res) => {
     });
 
     const parsed = JSON.parse(response.text || '{}');
+    let rawTestCode = parsed.testCode || '';
+    const safeTestCode = typeof rawTestCode === 'string' ? rawTestCode.replace(/[^a-zA-Z0-9_-]/g, '') : null;
+    
     const extractionResult = {
       studentId: parsed.studentId || null,
-      testCode: parsed.testCode || null,
+      testCode: safeTestCode,
       answers: parsed.answers || {},
       timestamp: new Date().toISOString()
     };
@@ -397,7 +453,7 @@ app.post('/api/extract-sheet', async (req, res) => {
         results.push({ questionNumber: qNum, extractedAnswer: extAns, correctAnswer: correctAns, isCorrect });
       }
       
-      const score = totalQuestions > 0 ? (correctCount / totalQuestions) * 10 : 0;
+      const score = totalQuestions > 0 ? Math.round((correctCount / totalQuestions) * 10 * 100) / 100 : 0;
       
       // Save image to disk
       const imageFileName = `${crypto.randomUUID()}.jpg`;
@@ -406,7 +462,7 @@ app.post('/api/extract-sheet', async (req, res) => {
       const newSubmission = {
         id: crypto.randomUUID(),
         studentId: extractionResult.studentId || 'unknown',
-        testCode: extractionResult.testCode,
+        testCode: safeTestCode,
         score,
         correctCount,
         totalQuestions,
@@ -416,7 +472,14 @@ app.post('/api/extract-sheet', async (req, res) => {
         status: 'graded' as const
       };
       
-      db.submissions.unshift(newSubmission);
+      const existingSubmissionIndex = db.submissions.findIndex(s => String(s.studentId) === String(newSubmission.studentId) && String(s.testCode) === String(newSubmission.testCode));
+      if (existingSubmissionIndex >= 0) {
+        newSubmission.id = db.submissions[existingSubmissionIndex].id; // Keep same ID so frontend keys don't break if dependent
+        db.submissions[existingSubmissionIndex] = newSubmission;
+      } else {
+        db.submissions.unshift(newSubmission);
+      }
+      
       writeDB(db);
       
       res.json({ success: true, graded: true, data: newSubmission });

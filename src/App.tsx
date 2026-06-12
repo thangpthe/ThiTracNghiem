@@ -16,6 +16,17 @@ export default function App() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    const userStr = localStorage.getItem('vision_grader_user');
+    if (userStr) {
+      try {
+        const u = JSON.parse(userStr);
+        setUser(u);
+        setRole(u.role as any);
+      } catch(e) {}
+    }
+  }, []);
+
   const handleRoleSelect = (selectedRole: typeof role) => {
     setRole(selectedRole);
     if (selectedRole === 'student') {
@@ -48,6 +59,7 @@ export default function App() {
            setError(`CCCD này dành cho ${data.user.role}, không phải ${role}.`);
         } else {
            setUser(data.user);
+           localStorage.setItem('vision_grader_user', JSON.stringify(data.user));
         }
       } else {
         setError(data.error);
@@ -61,6 +73,7 @@ export default function App() {
   const handleLogout = () => {
     setUser(null);
     setCccd('');
+    localStorage.removeItem('vision_grader_user');
   };
 
   return (
