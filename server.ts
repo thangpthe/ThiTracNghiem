@@ -15,7 +15,40 @@ const app = express();
 const PORT = 3000;
 
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
-const loginAttempts = new Map<string, { count: number, resetAt: number }>();
+
+interface RateLimitEntry { count: number, resetAt: number }
+
+function createRateLimiter(maxRequests: number, windowMs: number) {
+  const attempts = new Map<string, RateLimitEntry>();
+  
+  // Cleanup periodically to prevent memory leaks
+  setInterval(() => {
+    const now = Date.now();
+    for (const [ip, limit] of attempts.entries()) {
+      if (limit.resetAt < now) attempts.delete(ip);
+    }
+  }, windowMs);
+
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const ip = req.ip || req.connection?.remoteAddress || 'unknown';
+    const limit = attempts.get(ip);
+    const now = Date.now();
+    
+    if (limit && limit.count >= maxRequests && limit.resetAt > now) {
+      return res.status(429).json({ error: 'Quá nhiều yêu cầu. Thử lại sau.' });
+    }
+    
+    if (!limit || limit.resetAt < now) {
+      attempts.set(ip, { count: 1, resetAt: now + windowMs });
+    } else {
+      limit.count += 1;
+    }
+    next();
+  };
+}
+
+const loginRateLimiter = createRateLimiter(10, 5 * 60 * 1000); // 10 attempts per 5 minutes
+const publicApiRateLimiter = createRateLimiter(30, 60 * 1000); // 30 attempts per minute
 
 // Serve uploaded images securely
 app.use('/uploads', express.static(UPLOADS_DIR));
@@ -113,26 +146,14 @@ async function withDBLock(action: (db: any) => void) {
 }
 
 // --- AUTH APIs ---
-app.post('/api/auth/login', (req, res) => {
-  const ip = req.ip || req.connection?.remoteAddress || 'unknown';
-  const limit = loginAttempts.get(ip);
-  if (limit && limit.count >= 10 && limit.resetAt > Date.now()) {
-    return res.status(429).json({ error: 'Quá nhiều yêu cầu đăng nhập. Thử lại sau 5 phút.' });
-  }
-
+app.post('/api/auth/login', loginRateLimiter, (req, res) => {
   const { cccd } = req.body;
   const db = readDB();
   const user = db.users.find(u => u.cccd === cccd);
   if (user) {
-    if (limit) loginAttempts.delete(ip);
-    const token = jwt.sign({ cccd: user.cccd, role: user.role }, JWT_SECRET, { expiresIn: '12h' });
+    const token = jwt.sign({ cccd: user.cccd, role: user.role }, JWT_SECRET, { expiresIn: '4h' });
     res.json({ success: true, user, token });
   } else {
-    if (!limit || limit.resetAt < Date.now()) {
-      loginAttempts.set(ip, { count: 1, resetAt: Date.now() + 5 * 60 * 1000 });
-    } else {
-      limit.count += 1;
-    }
     res.json({ success: false, error: 'CCCD không hợp lệ hoặc không có quyền truy cập.' });
   }
 });
@@ -146,6 +167,10 @@ app.get('/api/admin/keys', requireRole(['admin', 'teacher', 'principal']), (req,
 
 app.post('/api/admin/keys', requireRole(['admin']), async (req, res) => {
   const { keys } = req.body;
+  if (typeof keys !== 'object' || keys === null || Array.isArray(keys)) {
+    return res.status(400).json({ error: 'Invalid keys format' });
+  }
+
   const safeKeys: any = {};
   for (const k in keys) {
      const safeK = k.replace(/[^a-zA-Z0-9_-]/g, '');
@@ -259,9 +284,9 @@ app.get('/api/teacher/stats/:teacherId', requireRole(['teacher', 'principal']), 
     const classId = sub.studentId ? `Lớp ${sub.studentId.substring(0, 2)}` : 'Chưa rõ';
     
     if (grade && classId.includes(grade)) {
-      if (!classStats[classId]) classStats[classId] = { totalScore: 0, count: 0 };
-      classStats[classId].totalScore += sub.score;
-      classStats[classId].count += 1;
+       if (!classStats[classId]) classStats[classId] = { totalScore: 0, count: 0 };
+       classStats[classId].totalScore += sub.score;
+       classStats[classId].count += 1;
     }
     
     if (classId === assignedClass) {
@@ -283,21 +308,28 @@ app.get('/api/teacher/stats/:teacherId', requireRole(['teacher', 'principal']), 
     totalSubmissions: submissions.length,
     averageScore,
     gradeClassAverages,
-    submissions: submissions.map(s => ({
-      ...s
-    }))
+    submissions: submissions.map(s => {
+      const { results, ...rest } = s;
+      return rest;
+    })
   });
 });
 
 app.post('/api/admin/submissions/:id/edit-score', requireRole(['admin']), async (req, res) => {
   const { id } = req.params;
   const { score } = req.body;
+  
+  const numericScore = Number(score);
+  if (isNaN(numericScore) || numericScore < 0 || numericScore > 10) {
+    return res.status(400).json({ error: 'Invalid score' });
+  }
+  
   let success = false;
   
   await withDBLock((db) => {
     const sub = db.submissions.find((s: any) => s.id === id);
     if (sub) {
-      sub.score = Number(score);
+      sub.score = numericScore;
       success = true;
     }
   });
@@ -331,10 +363,12 @@ app.post('/api/admin/submissions/:id/toggle-hide', requireRole(['admin', 'teache
 });
 
 app.get('/api/admin/submissions', requireRole(['admin', 'teacher']), (req, res) => {
-
   const db = readDB();
-  // Don't send full results array to save bandwidth if many, but we will send it for now
-  res.json({ success: true, submissions: db.submissions });
+  const summarySubmissions = db.submissions.map(s => {
+    const { results, ...rest } = s;
+    return rest;
+  });
+  res.json({ success: true, submissions: summarySubmissions });
 });
 
 app.post('/api/admin/appeal-resolve', requireRole(['admin']), async (req, res) => {
@@ -603,7 +637,7 @@ app.post('/api/extract-sheet', requireRole(['admin', 'teacher']), async (req, re
 
 // --- STUDENT APIs ---
 
-app.get('/api/public/result', (req, res) => {
+app.get('/api/public/result', publicApiRateLimiter, (req, res) => {
   const { studentId, testCode } = req.query;
   if (!studentId || !testCode) {
     return res.status(400).json({ success: false, error: 'Thiếu số báo danh hoặc mã đề' });
@@ -625,25 +659,7 @@ app.get('/api/public/result', (req, res) => {
   res.json({ success: true, submission: sub, isWithinWindow });
 });
 
-app.get('/api/student/result/:studentId', (req, res) => {
-  const { studentId } = req.params;
-  const db = readDB();
-  const sub = db.submissions.find(s => String(s.studentId) === String(studentId));
-  if (!sub) {
-    return res.json({ success: false, error: 'Không tìm thấy kết quả cho số báo danh này' });
-  }
-  if (sub.isHidden) {
-    return res.json({ success: false, error: 'Kết quả của bạn đã bị ẩn theo yêu cầu.' });
-  }
-  
-  // Calculate if within appeal window
-  const appealTimeMs = db.settings.appealWindowDays * 24 * 60 * 60 * 1000;
-  const isWithinWindow = (new Date().getTime() - new Date(sub.timestamp).getTime()) <= appealTimeMs;
-  
-  res.json({ success: true, submission: sub, isWithinWindow });
-});
-
-app.post('/api/student/appeal', async (req, res) => {
+app.post('/api/student/appeal', publicApiRateLimiter, async (req, res) => {
   const { id, reason, fullName, className } = req.body;
   let appealResolved = false;
   let updatedSub = null;

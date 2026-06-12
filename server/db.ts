@@ -69,15 +69,26 @@ const defaultDb: Database = {
   }
 };
 
+let cachedDB: Database | null = null;
+let lastModifiedTime: number = 0;
+
 export function readDB(): Database {
   if (!fs.existsSync(DB_FILE)) {
     writeDB(defaultDb);
     return defaultDb;
   }
   try {
+    const stats = fs.statSync(DB_FILE);
+    if (cachedDB && stats.mtimeMs === lastModifiedTime) {
+      return cachedDB;
+    }
+
     const db = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
     db.pendingKeys = db.pendingKeys || [];
     db.users = db.users || defaultDb.users;
+    
+    cachedDB = db;
+    lastModifiedTime = stats.mtimeMs;
     return db;
   } catch (e) {
     return defaultDb;
@@ -88,6 +99,9 @@ export function writeDB(db: Database) {
   const tempFile = DB_FILE + '.tmp';
   fs.writeFileSync(tempFile, JSON.stringify(db, null, 2));
   fs.renameSync(tempFile, DB_FILE);
+  
+  cachedDB = db;
+  lastModifiedTime = fs.statSync(DB_FILE).mtimeMs;
 }
 
 // Cleanup job that runs when called
