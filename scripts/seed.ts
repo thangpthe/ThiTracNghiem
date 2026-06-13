@@ -13,21 +13,18 @@ if (!db.users.find(u => u.cccd === '001002003004')) {
   });
 }
 
-// Add Answer Keys
-db.answerKeys['101'] = {
-  testCode: '101',
-  questions: Array.from({ length: 40 }, (_, i) => ({
-    questionIndex: i + 1,
-    correctAnswer: ['A', 'B', 'C', 'D'][Math.floor(Math.random() * 4)]
-  }))
-};
-db.answerKeys['102'] = {
-  testCode: '102',
-  questions: Array.from({ length: 40 }, (_, i) => ({
-    questionIndex: i + 1,
-    correctAnswer: ['A', 'B', 'C', 'D'][Math.floor(Math.random() * 4)]
-  }))
-};
+// Add Answer Keys with proper flat dictionary format
+const key101: any = {};
+for (let i = 1; i <= 40; i++) {
+  key101[String(i)] = ['A', 'B', 'C', 'D'][Math.floor(Math.random() * 4)];
+}
+db.answerKeys['101'] = key101;
+
+const key102: any = {};
+for (let i = 1; i <= 40; i++) {
+  key102[String(i)] = ['A', 'B', 'C', 'D'][Math.floor(Math.random() * 4)];
+}
+db.answerKeys['102'] = key102;
 
 // Add Submissions
 if (db.submissions.length < 5) {
@@ -38,6 +35,7 @@ if (db.submissions.length < 5) {
     const testCode = i % 2 === 0 ? '101' : '102';
     const score = Math.floor(Math.random() * 5) + 5; // 5 to 9
     const studentId = `1100${i.toString().padStart(2, '0')}`;
+    const activeKey = db.answerKeys[testCode];
     
     db.submissions.push({
       id: crypto.randomUUID(),
@@ -47,12 +45,16 @@ if (db.submissions.length < 5) {
       correctCount: score * 4,
       totalQuestions: 40,
       timestamp: new Date(Date.now() - Math.random() * 10 * 24 * 60 * 60 * 1000).toISOString(),
-      results: Array.from({ length: 40 }, (_, idx) => ({
-        questionIndex: idx + 1,
-        studentAnswer: ['A', 'B', 'C', 'D'][Math.floor(Math.random() * 4)],
-        correctAnswer: db.answerKeys[testCode].questions[idx].correctAnswer,
-        isCorrect: Math.random() > 0.2
-      })),
+      results: Array.from({ length: 40 }, (_, idx) => {
+        const qNum = String(idx + 1);
+        const correctAns = activeKey[qNum];
+        return {
+          questionNumber: qNum,
+          studentAnswer: ['A', 'B', 'C', 'D'][Math.floor(Math.random() * 4)],
+          correctAnswer: correctAns,
+          isCorrect: Math.random() > 0.2
+        };
+      }),
       imageFile: 'dummy.jpg',
       status: isAppeal ? 'appeal_pending' : 'graded',
       appealReason: isAppeal ? 'Dạ thưa cô em nghĩ câu 5 em tô đúng ạ, mong cô xem xét lại' : undefined,
@@ -61,25 +63,39 @@ if (db.submissions.length < 5) {
       isHidden: i % 10 === 0
     });
   }
+} else {
+  // If we already have submissions, let's fix their results with correct flat answer key format
+  for (const sub of db.submissions) {
+    const activeKey = db.answerKeys[sub.testCode];
+    if (activeKey) {
+      sub.results = sub.results.map((r: any) => {
+        const qNum = String(r.questionNumber || r.questionIndex || '');
+        const correct = activeKey[qNum] || r.correctAnswer;
+        return {
+          ...r,
+          questionNumber: qNum,
+          correctAnswer: correct,
+          isCorrect: r.isCorrect ?? (r.studentAnswer === correct)
+        };
+      });
+    }
+  }
 }
 
-// Add Pending Keys
-if (db.pendingKeys.length === 0) {
-  db.pendingKeys.push({
-    id: crypto.randomUUID(),
-    testCode: '201',
-    keyData: {
-      testCode: '201',
-      questions: Array.from({ length: 40 }, (_, i) => ({
-        questionIndex: i + 1,
-        correctAnswer: 'A'
-      }))
-    },
-    teacherId: '000000000002',
-    status: 'pending',
-    timestamp: new Date().toISOString()
-  });
+// Add Pending Keys with proper flat dictionary format
+db.pendingKeys = []; // Let's clear and re-create pendingKeys with proper format to avoid validation mismatch
+const pendingKey201: any = {};
+for (let i = 1; i <= 40; i++) {
+  pendingKey201[String(i)] = 'A';
 }
+db.pendingKeys.push({
+  id: crypto.randomUUID(),
+  testCode: '201',
+  keyData: pendingKey201,
+  teacherId: '000000000002',
+  status: 'pending',
+  timestamp: new Date().toISOString()
+});
 
 writeDB(db);
-console.log('Sample data seeded successfully!');
+console.log('Sample data seeded and migrated successfully!');

@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import lockfile from 'proper-lockfile';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 export const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
@@ -149,6 +150,18 @@ export function writeDB(db: Database) {
   rebuildSubmissionIndex(db);
   cachedDB = db;
   lastModifiedTime = fs.statSync(DB_FILE).mtimeMs;
+}
+
+export async function withDBLock(action: (db: Database) => void) {
+  let release;
+  try {
+    release = await lockfile.lock(DB_FILE, { retries: { retries: 10, minTimeout: 100, maxTimeout: 1000 } });
+    const db = readDB();
+    action(db);
+    writeDB(db);
+  } finally {
+    if (release) await release();
+  }
 }
 
 // Cleanup job that runs when called

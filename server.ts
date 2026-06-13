@@ -4,7 +4,7 @@ import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
 import fs from 'fs';
-import { readDB, writeDB, cleanupOldRecords, UPLOADS_DIR, logAudit, findSubmissionIndexed } from './server/db';
+import { readDB, writeDB, cleanupOldRecords, UPLOADS_DIR, logAudit, findSubmissionIndexed, getLastModifiedTime, withDBLock } from './server/db';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import lockfile from 'proper-lockfile';
@@ -23,20 +23,38 @@ const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('he
 
 interface RateLimitEntry { count: number, resetAt: number }
 
-function createRateLimiter(maxRequests: number, windowMs: number) {
+const blacklistedTokens = new Set<string>();
+
+// Periodically clean up expired tokens from the blacklist to save memory
+setInterval(() => {
+  const now = Math.floor(Date.now() / 1000);
+  for (const token of blacklistedTokens) {
+    try {
+      const decoded = jwt.decode(token) as any;
+      if (decoded && decoded.exp && decoded.exp < now) {
+        blacklistedTokens.delete(token);
+      }
+    } catch (_) {
+      blacklistedTokens.delete(token);
+    }
+  }
+}, 3600000); // Clean up every hour
+
+function createRateLimiter(maxRequests: number, windowMs: number, keyGenerator?: (req: express.Request) => string) {
   const attempts = new Map<string, RateLimitEntry>();
   
   // Cleanup periodically to prevent memory leaks
   setInterval(() => {
     const now = Date.now();
-    for (const [ip, limit] of attempts.entries()) {
-      if (limit.resetAt < now) attempts.delete(ip);
+    for (const [key, limit] of attempts.entries()) {
+      if (limit.resetAt < now) attempts.delete(key);
     }
   }, windowMs);
 
   return (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const ip = req.ip || req.connection?.remoteAddress || 'unknown';
-    const limit = attempts.get(ip);
+    const key = keyGenerator ? keyGenerator(req) : ip;
+    const limit = attempts.get(key);
     const now = Date.now();
     
     if (limit && limit.count >= maxRequests && limit.resetAt > now) {
@@ -44,7 +62,7 @@ function createRateLimiter(maxRequests: number, windowMs: number) {
     }
     
     if (!limit || limit.resetAt < now) {
-      attempts.set(ip, { count: 1, resetAt: now + windowMs });
+      attempts.set(key, { count: 1, resetAt: now + windowMs });
     } else {
       limit.count += 1;
     }
@@ -54,6 +72,10 @@ function createRateLimiter(maxRequests: number, windowMs: number) {
 
 const loginRateLimiter = createRateLimiter(10, 5 * 60 * 1000); // 10 attempts per 5 minutes
 const publicApiRateLimiter = createRateLimiter(200, 60 * 1000); // 200 attempts per minute for public queries
+const publicStudentIdRateLimiter = createRateLimiter(30, 5 * 60 * 1000, (req) => {
+  const { studentId, testCode } = req.query;
+  return `sid_${studentId || 'anon'}_tc_${testCode || 'anon'}`;
+});
 const appealRateLimiter = createRateLimiter(50, 60 * 1000); // 50 attempts per minute for appeals
 
 // Serve uploaded images securely
@@ -77,12 +99,12 @@ setInterval(() => cleanupOldRecords().catch(console.error), 1000 * 60 * 60 * 12)
 
 function requireRole(roles: string[]) {
   return (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    let token = req.cookies?.token;
-    if (!token) token = req.headers['authorization']?.split(' ')[1];
-    if (!token) {
-      token = req.headers['x-auth-token'] as string;
-    }
+    const token = req.cookies?.token;
     if (!token) return res.status(401).json({ error: 'Unauthorized: Missing token' });
+
+    if (blacklistedTokens.has(token)) {
+      return res.status(401).json({ error: 'Unauthorized: Token has been revoked' });
+    }
 
     try {
       const decoded = jwt.verify(token, JWT_SECRET) as any;
@@ -144,22 +166,6 @@ function applyUpdates(db: any, updates: Map<string, any>) {
   }
 }
 
-// --- DB FILE LOCK WRAPPER ---
-async function withDBLock(action: (db: any) => void) {
-  const filePath = path.resolve('data/db.json');
-  let release;
-  try {
-    if (!fs.existsSync('data')) fs.mkdirSync('data');
-    if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, JSON.stringify({}));
-    release = await lockfile.lock(filePath, { retries: { retries: 10, minTimeout: 100, maxTimeout: 1000 } });
-    const db = readDB();
-    action(db);
-    writeDB(db);
-  } finally {
-    if (release) await release();
-  }
-}
-
 // --- AUTH APIs ---
 app.post('/api/auth/login', loginRateLimiter, (req, res) => {
   const { cccd } = req.body;
@@ -180,6 +186,10 @@ app.post('/api/auth/login', loginRateLimiter, (req, res) => {
 });
 
 app.post('/api/auth/logout', (req, res) => {
+  const token = req.cookies?.token;
+  if (token) {
+    blacklistedTokens.add(token);
+  }
   res.clearCookie('token');
   res.json({ success: true });
 });
@@ -802,7 +812,7 @@ app.post('/api/extract-sheet', requireRole(['admin', 'teacher']), async (req, re
 
 // --- STUDENT APIs ---
 
-app.get('/api/public/result', publicApiRateLimiter, (req, res) => {
+app.get('/api/public/result', publicApiRateLimiter, publicStudentIdRateLimiter, (req, res) => {
   const { studentId, testCode } = req.query;
   if (!studentId || !testCode) {
     return res.status(400).json({ success: false, error: 'Thiếu số báo danh hoặc mã đề' });
