@@ -179,12 +179,30 @@ export default function AdminDashboard() {
     if (queue.length === 0) return;
     setIsProcessingBatch(true);
     const currentQueue = [...queue];
-    for (let i = 0; i < currentQueue.length; i++) {
-       if (currentQueue[i].status === 'success') continue;
-       setQueue(prev => prev.map(q => q.id === currentQueue[i].id ? { ...q, status: 'extracting' } : q));
-       const updatedItem = await processFile(currentQueue[i]);
-       setQueue(prev => prev.map(q => q.id === updatedItem.id ? updatedItem : q));
+    
+    const MAX_CONCURRENT = 3;
+    let i = 0;
+    
+    const executeNext = async (): Promise<void> => {
+      if (i >= currentQueue.length) return;
+      const index = i++;
+      const item = currentQueue[index];
+      if (item.status === 'success') {
+         return executeNext();
+      }
+      setQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: 'extracting' } : q));
+      const updatedItem = await processFile(item);
+      setQueue(prev => prev.map(q => q.id === updatedItem.id ? updatedItem : q));
+      return executeNext();
+    };
+
+    const workers = [];
+    for (let w = 0; w < Math.min(MAX_CONCURRENT, currentQueue.length); w++) {
+      workers.push(executeNext());
     }
+    
+    await Promise.all(workers);
+    
     setIsProcessingBatch(false);
     fetchState();
   };

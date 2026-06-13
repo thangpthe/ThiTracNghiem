@@ -85,10 +85,12 @@ const submissionIndexCache = new Map<string, Submission>();
 const AUDIT_LOG_FILE = path.join(DATA_DIR, 'audit.log');
 
 function rebuildSubmissionIndex(db: Database) {
-  submissionIndexCache.clear();
   for (const sub of db.submissions) {
     if (sub.studentId && sub.testCode) {
-      submissionIndexCache.set(`${sub.studentId}_${sub.testCode}`, sub);
+      const key = `${sub.studentId}_${sub.testCode}`;
+      if (!submissionIndexCache.has(key)) {
+        submissionIndexCache.set(key, sub);
+      }
     }
   }
 }
@@ -102,13 +104,17 @@ export function logAudit(entry: AuditLogEntry) {
   }
 }
 
-export function findSubmissionIndexed(studentId: string, testCode: string): Submission | undefined {
-  // Ensure we have read latest before we check cache
-  readDB(); 
+export function findSubmissionIndexed(studentId: string, testCode: string, db?: Database): Submission | undefined {
+  if (!db) readDB();
   return submissionIndexCache.get(`${studentId}_${testCode}`);
 }
 
+export function getLastModifiedTime() {
+  return lastModifiedTime;
+}
+
 export function readDB(): Database {
+  if (cachedDB) return cachedDB;
   if (!fs.existsSync(DB_FILE)) {
     writeDB(defaultDb);
     return defaultDb;

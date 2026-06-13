@@ -54,7 +54,7 @@ export default function App() {
         if (data.user.role !== role) {
            setError(`CCCD này dành cho ${data.user.role}, không phải ${role}.`);
         } else {
-           const sessionUser = { ...data.user, token: data.token };
+           const sessionUser = { ...data.user };
            setUser(sessionUser);
            localStorage.setItem('vision_grader_user', JSON.stringify(sessionUser));
         }
@@ -67,7 +67,8 @@ export default function App() {
     setLoading(false);
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try { await apiFetch('/api/auth/logout', { method: 'POST' }); } catch(e) {}
     setUser(null);
     setCccd('');
     localStorage.removeItem('vision_grader_user');

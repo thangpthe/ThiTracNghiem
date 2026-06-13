@@ -8,10 +8,12 @@ import { readDB, writeDB, cleanupOldRecords, UPLOADS_DIR, logAudit, findSubmissi
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import lockfile from 'proper-lockfile';
+import cookieParser from 'cookie-parser';
 
 dotenv.config();
 
 const app = express();
+app.use(cookieParser());
 const PORT = 3000;
 
 if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
@@ -75,7 +77,8 @@ setInterval(cleanupOldRecords, 1000 * 60 * 60 * 12); // every 12 hours
 
 function requireRole(roles: string[]) {
   return (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    let token = req.headers['authorization']?.split(' ')[1];
+    let token = req.cookies?.token;
+    if (!token) token = req.headers['authorization']?.split(' ')[1];
     if (!token) {
       token = req.headers['x-auth-token'] as string;
     }
@@ -99,14 +102,16 @@ function requireRole(roles: string[]) {
   };
 }
 
-function regradeSubmissions(db: any, testCode: string) {
-  const key = db.answerKeys[testCode];
-  if (!key) return;
+function calculateRegrades(submissions: any[], testCode: string, key: any) {
+  const updates = new Map<string, any>();
+  if (!key) return updates;
   const totalQuestions = Object.keys(key).length;
-  if (totalQuestions === 0) return;
+  if (totalQuestions === 0) return updates;
 
-  for (const sub of db.submissions) {
+  for (const sub of submissions) {
     if (sub.testCode === testCode) {
+      if (sub.status !== 'graded') continue;
+
       let correctCount = 0;
       const newResults = [];
       for (const [qNum, correctAns] of Object.entries(key)) {
@@ -120,15 +125,21 @@ function regradeSubmissions(db: any, testCode: string) {
          newResults.push({ questionNumber: qNum, extractedAnswer: extAns, correctAnswer: correctAns, isCorrect });
       }
       
-      if (sub.status !== 'graded') {
-        // Skip modifying score/results if appeal_pending or appeal_resolved to preserve manual interventions
-        continue;
-      }
-      
-      sub.results = newResults;
-      sub.correctCount = correctCount;
-      sub.totalQuestions = totalQuestions;
-      sub.score = Math.round((correctCount / totalQuestions) * 10 * 100) / 100;
+      const score = Math.round((correctCount / totalQuestions) * 10 * 100) / 100;
+      updates.set(sub.id, {score, correctCount, results: newResults, totalQuestions});
+    }
+  }
+  return updates;
+}
+
+function applyUpdates(db: any, updates: Map<string, any>) {
+  for (const sub of db.submissions) {
+    if (updates.has(sub.id)) {
+      const u = updates.get(sub.id);
+      sub.results = u.results;
+      sub.correctCount = u.correctCount;
+      sub.totalQuestions = u.totalQuestions;
+      sub.score = u.score;
     }
   }
 }
@@ -156,10 +167,21 @@ app.post('/api/auth/login', loginRateLimiter, (req, res) => {
   const user = db.users.find(u => u.cccd === cccd);
   if (user) {
     const token = jwt.sign({ cccd: user.cccd, role: user.role }, JWT_SECRET, { expiresIn: '4h' });
+    res.cookie('token', token, { 
+      httpOnly: true, 
+      secure: process.env.NODE_ENV === 'production', 
+      sameSite: 'strict', 
+      maxAge: 4 * 60 * 60 * 1000 
+    });
     res.json({ success: true, user, token });
   } else {
     res.json({ success: false, error: 'CCCD không hợp lệ hoặc không có quyền truy cập.' });
   }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('token');
+  res.json({ success: true });
 });
 
 // --- ADMIN APIs ---
@@ -181,11 +203,16 @@ app.post('/api/admin/keys', requireRole(['admin']), async (req, res) => {
      if (safeK) safeKeys[safeK] = keys[k];
   }
   
+  const db_cache = readDB();
+  const allUpdates = new Map<string, any>();
+  for (const k in safeKeys) {
+    const keyUpdates = calculateRegrades(db_cache.submissions, k, safeKeys[k]);
+    for (const [id, u] of keyUpdates) allUpdates.set(id, u);
+  }
+  
   await withDBLock((db) => {
     db.answerKeys = safeKeys;
-    for (const k in safeKeys) {
-       regradeSubmissions(db, k);
-    }
+    applyUpdates(db, allUpdates);
   });
   
   const db = readDB();
@@ -203,6 +230,15 @@ app.post('/api/admin/keys/approve', requireRole(['admin']), async (req, res) => 
   let success = false;
   let auditEntry: any = null;
   
+  const read_db = readDB();
+  const targetPk = (read_db.pendingKeys || []).find((k: any) => k.id === id);
+  if (!targetPk) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  
+  // Pre-calculate updates outside the lock to minimize file lock duration
+  const updates = calculateRegrades(read_db.submissions, targetPk.testCode, targetPk.keyData);
+  
   await withDBLock((db) => {
     const pk = (db.pendingKeys || []).find((k: any) => k.id === id);
     if (pk) {
@@ -217,7 +253,7 @@ app.post('/api/admin/keys/approve', requireRole(['admin']), async (req, res) => 
         details: `Approved key for test code ${pk.testCode}`
       };
       
-      regradeSubmissions(db, pk.testCode);
+      applyUpdates(db, updates);
       success = true;
     }
   });
@@ -310,22 +346,20 @@ app.get('/api/teacher/stats/:teacherId', requireRole(['teacher', 'principal']), 
   const gradeMatch = assignedClass.match(/\d+/);
   const grade = gradeMatch ? gradeMatch[0] : '';
   
+  buildBaseStats();
+  
   const classStats: Record<string, { totalScore: number; count: number }> = {};
   let submissions: any[] = [];
   
-  db.submissions.filter(s => !s.isHidden).forEach(sub => {
-    const classId = sub.studentId ? `Lớp ${sub.studentId.substring(0, 2)}` : 'Chưa rõ';
-    
+  for (const [classId, stats] of Object.entries(cachedClassStats)) {
     if (grade && classId.includes(grade)) {
-       if (!classStats[classId]) classStats[classId] = { totalScore: 0, count: 0 };
-       classStats[classId].totalScore += sub.score;
-       classStats[classId].count += 1;
+      classStats[classId] = stats;
     }
-    
-    if (classId === assignedClass) {
-       submissions.push(sub);
-    }
-  });
+  }
+  
+  if (cachedSubmissionsByClass[assignedClass]) {
+    submissions = cachedSubmissionsByClass[assignedClass];
+  }
 
   const gradeClassAverages = Object.keys(classStats).map(cId => ({
     className: cId,
@@ -341,10 +375,7 @@ app.get('/api/teacher/stats/:teacherId', requireRole(['teacher', 'principal']), 
     totalSubmissions: submissions.length,
     averageScore,
     gradeClassAverages,
-    submissions: submissions.map(s => {
-      const { results, ...rest } = s;
-      return rest;
-    })
+    submissions
   });
 });
 
@@ -496,36 +527,62 @@ app.post('/api/admin/settings', requireRole(['admin']), async (req, res) => {
   res.json({ success: true, settings: latestSettings });
 });
 
-app.get('/api/principal/stats', requireRole(['principal']), (req, res) => {
-  const db = readDB();
-  const submissions = db.submissions.filter((s:any) => !s.isHidden);
-  
-  const classStats: Record<string, { totalScore: number; count: number }> = {};
-  submissions.forEach(sub => {
-    // Giả lập lấy Mã Lớp từ 2 số đầu của SBD (Ví dụ: SBD 10123 -> Lớp 10)
-    const classId = sub.studentId ? `Lớp ${sub.studentId.substring(0, 2)}` : 'Chưa rõ';
-    if (!classStats[classId]) classStats[classId] = { totalScore: 0, count: 0 };
-    classStats[classId].totalScore += sub.score;
-    classStats[classId].count += 1;
-  });
+let lastStatsTime = 0;
+let cachedClassStats: Record<string, { totalScore: number; count: number }> = {};
+let cachedSubmissionsByClass: Record<string, any[]> = {};
+let cachedTotalVisibleSubmissionsCount = 0;
+let cachedTotalVisibleSubmissionsScore = 0;
 
-  const classAverages = Object.keys(classStats).map(classId => ({
+function buildBaseStats() {
+  const time = getLastModifiedTime();
+  if (lastStatsTime === time) return;
+  const db = readDB();
+  cachedClassStats = {};
+  cachedSubmissionsByClass = {};
+  let totalCount = 0;
+  let totalScore = 0;
+  
+  db.submissions.forEach((sub: any) => {
+    if (sub.isHidden) return;
+    totalCount++;
+    totalScore += sub.score;
+    
+    const classId = sub.studentId ? `Lớp ${sub.studentId.substring(0, 2)}` : 'Chưa rõ';
+    if (!cachedClassStats[classId]) cachedClassStats[classId] = { totalScore: 0, count: 0 };
+    cachedClassStats[classId].totalScore += sub.score;
+    cachedClassStats[classId].count += 1;
+    
+    if (!cachedSubmissionsByClass[classId]) cachedSubmissionsByClass[classId] = [];
+    cachedSubmissionsByClass[classId].push({
+       studentId: sub.studentId,
+       testCode: sub.testCode,
+       score: sub.score,
+       timestamp: sub.timestamp
+    });
+  });
+  
+  cachedTotalVisibleSubmissionsCount = totalCount;
+  cachedTotalVisibleSubmissionsScore = totalScore;
+  lastStatsTime = time;
+}
+
+app.get('/api/principal/stats', requireRole(['principal']), (req, res) => {
+  buildBaseStats();
+  
+  const classAverages = Object.keys(cachedClassStats).map(classId => ({
     className: classId,
-    averageScore: classStats[classId].totalScore / classStats[classId].count,
-    studentCount: classStats[classId].count
+    averageScore: cachedClassStats[classId].totalScore / cachedClassStats[classId].count,
+    studentCount: cachedClassStats[classId].count
   }));
+
+  const allSubmissions = Object.values(cachedSubmissionsByClass).flat();
 
   res.json({
     success: true,
-    totalSubmissions: submissions.length,
-    averageScore: submissions.length > 0 ? submissions.reduce((sum, s) => sum + s.score, 0) / submissions.length : 0,
+    totalSubmissions: cachedTotalVisibleSubmissionsCount,
+    averageScore: cachedTotalVisibleSubmissionsCount > 0 ? cachedTotalVisibleSubmissionsScore / cachedTotalVisibleSubmissionsCount : 0,
     classAverages,
-    submissions: submissions.map(s => ({
-      studentId: s.studentId,
-      testCode: s.testCode,
-      score: s.score,
-      timestamp: s.timestamp
-    }))
+    submissions: allSubmissions
   });
 });
 
@@ -753,7 +810,8 @@ app.get('/api/public/result', publicApiRateLimiter, (req, res) => {
     return res.status(400).json({ success: false, error: 'Thiếu số báo danh hoặc mã đề' });
   }
 
-  const sub = findSubmissionIndexed(String(studentId), String(testCode));
+  const db = readDB();
+  const sub = findSubmissionIndexed(String(studentId), String(testCode), db);
   if (!sub) {
     return res.json({ success: false, error: 'Không tìm thấy kết quả cho thông tin này' });
   }
@@ -761,7 +819,6 @@ app.get('/api/public/result', publicApiRateLimiter, (req, res) => {
     return res.json({ success: false, error: 'Kết quả của bạn đang được ẩn theo yêu cầu của giáo viên.' });
   }
   
-  const db = readDB();
   // Calculate if within appeal window
   const appealTimeMs = db.settings.appealWindowDays * 24 * 60 * 60 * 1000;
   const isWithinWindow = (new Date().getTime() - new Date(sub.timestamp).getTime()) <= appealTimeMs;
