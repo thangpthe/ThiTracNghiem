@@ -86,13 +86,13 @@ function requireRole(roles: string[]) {
 
     try {
       const decoded = jwt.verify(token, JWT_SECRET) as any;
-      if (!roles.includes(decoded.role)) {
-        return res.status(403).json({ error: 'Forbidden: Invalid role' });
-      }
-      
       const db = readDB();
       const user = db.users.find(u => u.cccd === decoded.cccd);
       if (!user) return res.status(401).json({ error: 'User no longer exists' });
+      
+      if (!roles.includes(user.role)) {
+        return res.status(403).json({ error: 'Forbidden: Invalid role' });
+      }
       
       (req as any).user = user;
       next();

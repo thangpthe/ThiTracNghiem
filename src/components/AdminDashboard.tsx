@@ -210,6 +210,7 @@ export default function AdminDashboard() {
     
     await Promise.all(workers);
     
+    if (!isMountedRef.current) return;
     setIsProcessingBatch(false);
     fetchState();
   };

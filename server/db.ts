@@ -117,7 +117,7 @@ export function getLastModifiedTime() {
 export function readDB(): Database {
   if (!fs.existsSync(DB_FILE)) {
     writeDB(defaultDb);
-    return defaultDb;
+    return JSON.parse(JSON.stringify(defaultDb));
   }
   try {
     const stats = fs.statSync(DB_FILE);
@@ -136,7 +136,8 @@ export function readDB(): Database {
     lastModifiedTime = stats.mtimeMs;
     return db;
   } catch (e) {
-    return defaultDb;
+    console.error('[db] readDB error, returning safe default:', e);
+    return JSON.parse(JSON.stringify(defaultDb));
   }
 }
 
