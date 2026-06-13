@@ -152,30 +152,41 @@ export function writeDB(db: Database) {
 }
 
 // Cleanup job that runs when called
-export function cleanupOldRecords() {
+export async function cleanupOldRecords() {
   const db = readDB();
   const now = new Date().getTime();
   const retentionMs = db.settings.retentionDays * 24 * 60 * 60 * 1000;
   
-  let changed = false;
-  const newSubmissions = [];
+  const hasExpired = db.submissions.some(sub => 
+    now - new Date(sub.timestamp).getTime() > retentionMs
+  );
   
-  for (const sub of db.submissions) {
-    const time = new Date(sub.timestamp).getTime();
-    if (now - time > retentionMs) {
-      const filePath = path.join(UPLOADS_DIR, sub.imageFile);
-      if (fs.existsSync(filePath)) {
-        try { fs.unlinkSync(filePath); } catch (e) {}
+  if (!hasExpired) return;
+
+  await withDBLock((lockedDb) => {
+    let changed = false;
+    const newSubmissions = [];
+    const currentNow = new Date().getTime();
+    const currentRetentionMs = lockedDb.settings.retentionDays * 24 * 60 * 60 * 1000;
+    
+    for (const sub of lockedDb.submissions) {
+      const time = new Date(sub.timestamp).getTime();
+      if (currentNow - time > currentRetentionMs) {
+        if (sub.imageFile) {
+          const filePath = path.join(UPLOADS_DIR, sub.imageFile);
+          if (fs.existsSync(filePath)) {
+            try { fs.unlinkSync(filePath); } catch (e) {}
+          }
+        }
+        changed = true;
+      } else {
+        newSubmissions.push(sub);
       }
-      changed = true;
-    } else {
-      newSubmissions.push(sub);
     }
-  }
-  
-  if (changed) {
-    db.submissions = newSubmissions;
-    writeDB(db);
-  }
+    
+    if (changed) {
+      lockedDb.submissions = newSubmissions;
+    }
+  });
 }
 

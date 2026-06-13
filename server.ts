@@ -72,8 +72,8 @@ const ai = new GoogleGenAI({
 });
 
 // Run cleanup job occasionally (or on start)
-cleanupOldRecords();
-setInterval(cleanupOldRecords, 1000 * 60 * 60 * 12); // every 12 hours
+cleanupOldRecords().catch(console.error);
+setInterval(() => cleanupOldRecords().catch(console.error), 1000 * 60 * 60 * 12); // every 12 hours
 
 function requireRole(roles: string[]) {
   return (req: express.Request, res: express.Response, next: express.NextFunction) => {

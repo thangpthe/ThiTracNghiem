@@ -28,6 +28,7 @@ export default function AdminDashboard() {
   const [tab, setTab] = useState<'scan' | 'submissions' | 'approvals' | 'settings'>('scan');
 
   const [settings, setSettings] = useState({ appealWindowDays: 3, retentionDays: 15 });
+  const [fetchError, setFetchError] = useState<string | null>(null);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const keyInputRef = useRef<HTMLInputElement>(null);
@@ -40,6 +41,7 @@ export default function AdminDashboard() {
 
   const fetchState = async () => {
     try {
+      setFetchError(null);
       if (tab === 'scan' || tab === 'submissions') {
         const keysRes = await apiFetch('/api/admin/keys').then(r => r.json());
         setKeysCount(Object.keys(keysRes.keys || {}).length);
@@ -60,7 +62,9 @@ export default function AdminDashboard() {
         const setRes = await apiFetch('/api/admin/settings').then(r => r.json());
         setSettings(setRes.settings || { appealWindowDays: 3, retentionDays: 15 });
       }
-    } catch(e) {}
+    } catch(e: any) {
+      setFetchError('Lỗi kết nối tới máy chủ. Vui lòng thử lại sau.');
+    }
   };
 
   useEffect(() => { fetchState(); }, [tab, currentPage]);
@@ -255,6 +259,12 @@ export default function AdminDashboard() {
 
   return (
     <div className="space-y-8">
+      {fetchError && (
+        <div className="bg-red-50 text-red-600 p-4 rounded-lg flex items-center gap-2 mb-4">
+          <AlertCircle className="w-5 h-5 flex-shrink-0" />
+          <p className="text-sm font-medium">{fetchError}</p>
+        </div>
+      )}
       <div className="flex border-b border-neutral-200 overflow-x-auto">
         <button className={cn("pb-2 px-4 font-medium text-sm transition-colors whitespace-nowrap", tab==='scan' ? "border-b-2 border-indigo-600 text-indigo-600" : "text-neutral-500 hover:text-neutral-700")} onClick={()=>setTab('scan')}>Chấm bài (Scan)</button>
         <button className={cn("pb-2 px-4 font-medium text-sm transition-colors flex items-center gap-2 whitespace-nowrap", tab==='approvals' ? "border-b-2 border-indigo-600 text-indigo-600" : "text-neutral-500 hover:text-neutral-700")} onClick={()=>setTab('approvals')}>

@@ -28,7 +28,7 @@ export default function PublicScoreLookup({ onGoToLogin }: { onGoToLogin: () => 
     
     try {
       // Send fullName and className along with the query so backend could optionally log it or just query by ID & testCode
-      const res = await apiFetch(`/api/public/result?studentId=${studentId}&testCode=${testCode}&name=${encodeURIComponent(fullName)}&className=${encodeURIComponent(className)}`);
+      const res = await apiFetch(`/api/public/result?studentId=${encodeURIComponent(studentId)}&testCode=${encodeURIComponent(testCode)}&name=${encodeURIComponent(fullName)}&className=${encodeURIComponent(className)}`);
       const data = await res.json();
       if (data.success) {
         setResult(data.submission);

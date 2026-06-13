@@ -9,6 +9,7 @@ export default function TeacherDashboard({ user }: { user: any }) {
   const [tab, setTab] = useState<'upload' | 'stats'>('upload');
   
   const [keyError, setKeyError] = useState<string | null>(null);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const [pendingKeys, setPendingKeys] = useState<any[]>([]);
   const [stats, setStats] = useState<any>(null);
   
@@ -16,13 +17,16 @@ export default function TeacherDashboard({ user }: { user: any }) {
 
   const fetchState = async () => {
     try {
+      setFetchError(null);
       const [histRes, statRes] = await Promise.all([
         apiFetch(`/api/teacher/keys/history/${user.cccd}`).then(r => r.json()),
         apiFetch(`/api/teacher/stats/${user.cccd}`).then(r => r.json()),
       ]);
       setPendingKeys(histRes.pendingKeys || []);
       setStats(statRes);
-    } catch(e) {}
+    } catch(e) {
+      setFetchError('Lỗi kết nối tới máy chủ. Vui lòng thử lại sau.');
+    }
   };
 
   useEffect(() => { fetchState(); }, [tab]);
@@ -89,6 +93,12 @@ export default function TeacherDashboard({ user }: { user: any }) {
 
   return (
     <div className="space-y-8">
+      {fetchError && (
+        <div className="bg-red-50 text-red-600 p-4 rounded-lg flex items-center gap-2 mb-4">
+          <AlertCircle className="w-5 h-5 flex-shrink-0" />
+          <p className="text-sm font-medium">{fetchError}</p>
+        </div>
+      )}
       <div className="flex border-b border-neutral-200">
         <button className={cn("pb-2 px-4 font-medium text-sm transition-colors", tab==='upload' ? "border-b-2 border-indigo-600 text-indigo-600" : "text-neutral-500 hover:text-neutral-700")} onClick={()=>setTab('upload')}>Đề xuất Đáp án</button>
         <button className={cn("pb-2 px-4 font-medium text-sm transition-colors", tab==='stats' ? "border-b-2 border-indigo-600 text-indigo-600" : "text-neutral-500 hover:text-neutral-700")} onClick={()=>setTab('stats')}>Thống kê Lớp phụ trách</button>
