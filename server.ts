@@ -142,13 +142,13 @@ function calculateRegrades(submissions: any[], testCode: string, key: any) {
       const newResults = [];
       for (const [qNum, correctAns] of Object.entries(key)) {
          const oldRes = sub.results.find((r: any) => r.questionNumber === qNum);
-         const extAns = oldRes ? oldRes.extractedAnswer : null;
+         const extAns = oldRes ? (oldRes.studentAnswer ?? oldRes.extractedAnswer ?? null) : null;
          let isCorrect = false;
          if (extAns) {
            isCorrect = String(extAns).toLowerCase().trim() === String(correctAns).toLowerCase().trim();
          }
          if (isCorrect) correctCount++;
-         newResults.push({ questionNumber: qNum, extractedAnswer: extAns, correctAnswer: correctAns, isCorrect });
+         newResults.push({ questionNumber: qNum, studentAnswer: extAns, extractedAnswer: extAns, correctAnswer: correctAns, isCorrect });
       }
       
       const score = Math.round((correctCount / totalQuestions) * 10 * 100) / 100;
@@ -760,7 +760,7 @@ app.post('/api/extract-sheet', requireRole(['admin', 'teacher']), async (req, re
           isCorrect = String(extAns).toLowerCase().trim() === String(correctAns).toLowerCase().trim();
         }
         if (isCorrect) correctCount++;
-        results.push({ questionNumber: qNum, extractedAnswer: extAns, correctAnswer: correctAns, isCorrect });
+        results.push({ questionNumber: qNum, studentAnswer: extAns, extractedAnswer: extAns, correctAnswer: correctAns, isCorrect });
       }
       
       const score = totalQuestions > 0 ? Math.round((correctCount / totalQuestions) * 10 * 100) / 100 : 0;

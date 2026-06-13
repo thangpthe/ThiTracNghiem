@@ -179,7 +179,7 @@ export default function PublicScoreLookup({ onGoToLogin }: { onGoToLogin: () => 
                      {result.results.map((r, i) => (
                        <tr key={i} className={`border-b border-neutral-50 last:border-0 ${r.isCorrect ? "" : "bg-red-50/30"}`}>
                          <td className="px-4 py-2.5 font-medium text-neutral-600 border-r border-neutral-50 w-16">{r.questionNumber}</td>
-                         <td className="px-4 py-2.5 text-neutral-800">{r.extractedAnswer || '-'}</td>
+                         <td className="px-4 py-2.5 text-neutral-800">{r.studentAnswer || r.extractedAnswer || '-'}</td>
                          <td className={`px-4 py-2.5 font-semibold ${r.isCorrect ? "text-emerald-600" : "text-red-500"}`}>{r.correctAnswer.toString()}</td>
                        </tr>
                      ))}
