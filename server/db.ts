@@ -85,6 +85,7 @@ const submissionIndexCache = new Map<string, Submission>();
 const AUDIT_LOG_FILE = path.join(DATA_DIR, 'audit.log');
 
 function rebuildSubmissionIndex(db: Database) {
+  submissionIndexCache.clear();
   for (const sub of db.submissions) {
     if (sub.studentId && sub.testCode) {
       const key = `${sub.studentId}_${sub.testCode}`;
@@ -114,7 +115,6 @@ export function getLastModifiedTime() {
 }
 
 export function readDB(): Database {
-  if (cachedDB) return cachedDB;
   if (!fs.existsSync(DB_FILE)) {
     writeDB(defaultDb);
     return defaultDb;

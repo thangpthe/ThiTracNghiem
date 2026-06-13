@@ -554,6 +554,7 @@ function buildBaseStats() {
     
     if (!cachedSubmissionsByClass[classId]) cachedSubmissionsByClass[classId] = [];
     cachedSubmissionsByClass[classId].push({
+       id: sub.id,
        studentId: sub.studentId,
        testCode: sub.testCode,
        score: sub.score,
@@ -755,9 +756,7 @@ app.post('/api/extract-sheet', requireRole(['admin', 'teacher']), async (req, re
       
       const score = totalQuestions > 0 ? Math.round((correctCount / totalQuestions) * 10 * 100) / 100 : 0;
       
-      // Save image to disk
       const imageFileName = `${crypto.randomUUID()}.jpg`;
-      fs.writeFileSync(path.join(UPLOADS_DIR, imageFileName), Buffer.from(base64Data, 'base64'));
       
       const newSubmission = {
         id: crypto.randomUUID(),
@@ -777,9 +776,8 @@ app.post('/api/extract-sheet', requireRole(['admin', 'teacher']), async (req, re
         const existingSubmissionIndex = dbLockInstance.submissions.findIndex((s: any) => String(s.studentId) === String(newSubmission.studentId) && String(s.testCode) === String(newSubmission.testCode));
         if (existingSubmissionIndex >= 0) {
           hasConflict = true;
-          // Delete the newly uploaded image since we won't save it
-          try { fs.unlinkSync(path.join(UPLOADS_DIR, imageFileName)); } catch (e) {}
         } else {
+          fs.writeFileSync(path.join(UPLOADS_DIR, imageFileName), Buffer.from(base64Data, 'base64'));
           dbLockInstance.submissions.unshift(newSubmission);
         }
       });
