@@ -128,6 +128,9 @@ function requireRole(roles: string[]) {
   };
 }
 
+// Lock map để tránh 2 re-grade job chạy song song trên cùng 1 testCode
+const regradeInProgress = new Set<string>();
+
 function calculateRegrades(submissions: any[], testCode: string, key: any) {
   const updates = new Map<string, any>();
   if (!key) return updates;
@@ -150,8 +153,8 @@ function calculateRegrades(submissions: any[], testCode: string, key: any) {
          if (isCorrect) correctCount++;
          newResults.push({ questionNumber: qNum, studentAnswer: extAns, extractedAnswer: extAns, correctAnswer: correctAns, isCorrect });
       }
-      
-      const score = Math.round((correctCount / totalQuestions) * 10 * 100) / 100;
+      // Dùng integer arithmetic để tránh sai số floating-point (vd: 0.33 * 30 = 9.899...)
+      const score = Math.round((correctCount * 10 * 100) / totalQuestions) / 100;
       updates.set(sub.id, {score, correctCount, results: newResults, totalQuestions});
     }
   }
@@ -216,24 +219,34 @@ app.post('/api/admin/keys', requireRole(['admin']), async (req, res) => {
      const safeK = k.replace(/[^a-zA-Z0-9_-]/g, '');
      if (safeK) safeKeys[safeK] = keys[k];
   }
-  
-  await withDBLock((db) => {
-    if (mode === 'clear') {
-      db.answerKeys = {};
-    } else {
-      db.answerKeys = { ...db.answerKeys, ...safeKeys };
-    }
-    
-    const allUpdates = new Map<string, any>();
-    for (const k in safeKeys) {
-      const keyUpdates = calculateRegrades(db.submissions, k, safeKeys[k]);
-      for (const [id, u] of keyUpdates) allUpdates.set(id, u);
-    }
-    applyUpdates(db, allUpdates);
-  });
-  
-  const db = readDB();
-  res.json({ success: true, keys: db.answerKeys });
+
+  // Chặn re-grade đồng thời trên cùng testCode
+  const blockedCodes = Object.keys(safeKeys).filter(k => regradeInProgress.has(k));
+  if (blockedCodes.length > 0) {
+    return res.status(409).json({ error: `Re-grade đang chạy cho mã đề: ${blockedCodes.join(', ')}. Vui lòng chờ.` });
+  }
+  for (const k in safeKeys) regradeInProgress.add(k);
+
+  try {
+    await withDBLock((db) => {
+      if (mode === 'clear') {
+        db.answerKeys = {};
+      } else {
+        db.answerKeys = { ...db.answerKeys, ...safeKeys };
+      }
+      const allUpdates = new Map<string, any>();
+      for (const k in safeKeys) {
+        const keyUpdates = calculateRegrades(db.submissions, k, safeKeys[k]);
+        for (const [id, u] of keyUpdates) allUpdates.set(id, u);
+      }
+      applyUpdates(db, allUpdates);
+    });
+    invalidateStatsCache(); // Invalidate cache sau khi re-grade xong
+    const db = readDB();
+    res.json({ success: true, keys: db.answerKeys });
+  } finally {
+    for (const k in safeKeys) regradeInProgress.delete(k);
+  }
 });
 
 app.get('/api/admin/keys/pending', requireRole(['admin']), (req, res) => {
@@ -246,33 +259,45 @@ app.post('/api/admin/keys/approve', requireRole(['admin']), async (req, res) => 
   const adminCccd = (req as any).user.cccd;
   let success = false;
   let auditEntry: any = null;
-  
-  await withDBLock((db) => {
-    const pk = (db.pendingKeys || []).find((k: any) => k.id === id);
-    if (pk) {
-      pk.status = 'approved';
-      db.answerKeys[pk.testCode] = pk.keyData;
-      
-      auditEntry = {
-        action: 'APPROVE_KEY',
-        actorCccd: adminCccd,
-        targetId: id,
-        timestamp: new Date().toISOString(),
-        details: `Approved key for test code ${pk.testCode}`
-      };
-      
-      const updates = calculateRegrades(db.submissions, pk.testCode, pk.keyData);
-      applyUpdates(db, updates);
-      success = true;
+  let testCodeToLock: string | null = null;
+
+  // Tìm testCode trước để kiểm tra lock
+  const preCheck = readDB();
+  const pkCheck = (preCheck.pendingKeys || []).find((k: any) => k.id === id);
+  if (pkCheck) testCodeToLock = pkCheck.testCode;
+
+  if (testCodeToLock && regradeInProgress.has(testCodeToLock)) {
+    return res.status(409).json({ error: `Re-grade đang chạy cho mã đề ${testCodeToLock}. Vui lòng chờ.` });
+  }
+  if (testCodeToLock) regradeInProgress.add(testCodeToLock);
+
+  try {
+    await withDBLock((db) => {
+      const pk = (db.pendingKeys || []).find((k: any) => k.id === id);
+      if (pk) {
+        pk.status = 'approved';
+        db.answerKeys[pk.testCode] = pk.keyData;
+        auditEntry = {
+          action: 'APPROVE_KEY',
+          actorCccd: adminCccd,
+          targetId: id,
+          timestamp: new Date().toISOString(),
+          details: `Approved key for test code ${pk.testCode}`
+        };
+        const updates = calculateRegrades(db.submissions, pk.testCode, pk.keyData);
+        applyUpdates(db, updates);
+        success = true;
+      }
+    });
+    if (auditEntry) logAudit(auditEntry);
+    if (success) {
+      invalidateStatsCache();
+      res.json({ success: true });
+    } else {
+      res.status(404).json({ error: 'Not found' });
     }
-  });
-
-  if (auditEntry) logAudit(auditEntry);
-
-  if (success) {
-    res.json({ success: true });
-  } else {
-    res.status(404).json({ error: 'Not found' });
+  } finally {
+    if (testCodeToLock) regradeInProgress.delete(testCodeToLock);
   }
 });
 
@@ -336,8 +361,13 @@ app.post('/api/teacher/keys/submit', requireRole(['teacher']), async (req, res) 
 });
 
 app.get('/api/teacher/keys/history/:teacherId', requireRole(['teacher']), (req, res) => {
+  const user = (req as any).user;
+  // Chặn IDOR: teacher chỉ được xem lịch sử của chính mình
+  if (user.cccd !== req.params.teacherId) {
+    return res.status(403).json({ error: 'Forbidden: Không được xem lịch sử của giáo viên khác' });
+  }
   const db = readDB();
-  res.json({ success: true, pendingKeys: (db.pendingKeys || []).filter(k => k.teacherId === req.params.teacherId) });
+  res.json({ success: true, pendingKeys: (db.pendingKeys || []).filter((k: any) => k.teacherId === req.params.teacherId) });
 });
 
 app.get('/api/teacher/stats/:teacherId', requireRole(['teacher', 'principal']), (req, res) => {
@@ -405,7 +435,7 @@ app.post('/api/admin/submissions/:id/edit-score', requireRole(['admin']), async 
     const sub = db.submissions.find((s: any) => s.id === id);
     if (sub) {
       const oldScore = sub.score;
-      sub.score = numericScore;
+      sub.score = Math.round(numericScore * 100) / 100; // chuẩn hoá 2 chữ số thập phân
       
       auditEntry = {
         action: 'EDIT_SCORE',
@@ -413,7 +443,7 @@ app.post('/api/admin/submissions/:id/edit-score', requireRole(['admin']), async 
         targetId: id,
         timestamp: new Date().toISOString(),
         oldValue: oldScore,
-        newValue: numericScore
+        newValue: sub.score
       };
       
       success = true;
@@ -423,6 +453,7 @@ app.post('/api/admin/submissions/:id/edit-score', requireRole(['admin']), async 
   if (auditEntry) logAudit(auditEntry);
   
   if (success) {
+    invalidateStatsCache(); // Buộc rebuild cache sau khi sửa điểm
     res.json({ success: true });
   } else {
     res.status(404).json({ error: 'Not found' });
@@ -541,6 +572,11 @@ let cachedClassStats: Record<string, { totalScore: number; count: number }> = {}
 let cachedSubmissionsByClass: Record<string, any[]> = {};
 let cachedTotalVisibleSubmissionsCount = 0;
 let cachedTotalVisibleSubmissionsScore = 0;
+
+/** Buộc rebuild cache ở lần buildBaseStats() tiếp theo (dùng sau mọi thao tác thay đổi điểm) */
+function invalidateStatsCache() {
+  lastStatsTime = 0;
+}
 
 function buildBaseStats() {
   const time = getLastModifiedTime();

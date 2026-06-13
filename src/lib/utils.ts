@@ -39,6 +39,18 @@ export function exportToCSV(data: any[], filename: string) {
   }
 }
 
+/**
+ * Tính điểm với integer arithmetic để tránh sai số floating-point IEEE 754.
+ * Công thức: Math.round((correctCount * 10 * 100) / totalQuestions) / 100
+ * Ví dụ: 3/30 câu = Math.round(3*1000/30)/100 = Math.round(100)/100 = 1.00
+ *         không bị 0.9999999... như float thuần túy.
+ */
+export function calcScore(correctCount: number, totalQuestions: number): number {
+  if (totalQuestions === 0) return 0;
+  // Nhân nguyên trước (×1000) để giữ độ chính xác, sau đó chia
+  return Math.round((correctCount * 10 * 100) / totalQuestions) / 100;
+}
+
 export function gradeSheet(extraction: SheetExtraction, key: AnswerKey): GradingResponse {
   const results: GradingResultItem[] = [];
   let correctCount = 0;
@@ -70,7 +82,8 @@ export function gradeSheet(extraction: SheetExtraction, key: AnswerKey): Grading
     results,
     correctCount,
     totalQuestions,
-    score: totalQuestions > 0 ? (correctCount / totalQuestions) * 10 : 0,
+    // Dùng calcScore thay vì float division trực tiếp
+    score: calcScore(correctCount, totalQuestions),
     timestamp: extraction.timestamp || new Date().toISOString()
   };
 }
