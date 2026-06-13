@@ -31,6 +31,12 @@ export default function AdminDashboard() {
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const keyInputRef = useRef<HTMLInputElement>(null);
+  const isMountedRef = useRef<boolean>(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
 
   const fetchState = async () => {
     try {
@@ -184,7 +190,7 @@ export default function AdminDashboard() {
     let i = 0;
     
     const executeNext = async (): Promise<void> => {
-      if (i >= currentQueue.length) return;
+      if (!isMountedRef.current || i >= currentQueue.length) return;
       const index = i++;
       const item = currentQueue[index];
       if (item.status === 'success') {
@@ -192,6 +198,7 @@ export default function AdminDashboard() {
       }
       setQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: 'extracting' } : q));
       const updatedItem = await processFile(item);
+      if (!isMountedRef.current) return;
       setQueue(prev => prev.map(q => q.id === updatedItem.id ? updatedItem : q));
       return executeNext();
     };

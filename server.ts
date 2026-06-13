@@ -173,7 +173,7 @@ app.post('/api/auth/login', loginRateLimiter, (req, res) => {
       sameSite: 'strict', 
       maxAge: 4 * 60 * 60 * 1000 
     });
-    res.json({ success: true, user, token });
+    res.json({ success: true, user });
   } else {
     res.json({ success: false, error: 'CCCD không hợp lệ hoặc không có quyền truy cập.' });
   }
@@ -825,7 +825,7 @@ app.get('/api/public/result', publicApiRateLimiter, (req, res) => {
 });
 
 app.post('/api/student/appeal', appealRateLimiter, async (req, res) => {
-  const { id, reason, fullName, className } = req.body;
+  const { id, reason, fullName, className, studentId } = req.body;
   let appealResolved = false;
   let updatedSub = null;
   let errorMsg = null;
@@ -834,6 +834,12 @@ app.post('/api/student/appeal', appealRateLimiter, async (req, res) => {
     const index = db.submissions.findIndex((s: any) => s.id === id);
     if (index >= 0) {
       const sub = db.submissions[index];
+      
+      if (String(sub.studentId) !== String(studentId)) {
+        errorMsg = 'Không có quyền phúc khảo bài thi này';
+        return;
+      }
+      
       const appealTimeMs = db.settings.appealWindowDays * 24 * 60 * 60 * 1000;
       const isWithinWindow = (new Date().getTime() - new Date(sub.timestamp).getTime()) <= appealTimeMs;
       

@@ -50,7 +50,7 @@ export default function PublicScoreLookup({ onGoToLogin }: { onGoToLogin: () => 
       const res = await apiFetch('/api/student/appeal', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: result.id, reason: appealReason, fullName, className })
+        body: JSON.stringify({ id: result.id, reason: appealReason, fullName, className, studentId })
       });
       const data = await res.json();
       if (data.success) {
