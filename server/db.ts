@@ -43,11 +43,22 @@ export interface User {
   assignedClass?: string;
 }
 
+export interface AuditLogEntry {
+  action: string;
+  actorCccd: string;
+  targetId?: string;
+  timestamp: string;
+  oldValue?: any;
+  newValue?: any;
+  details?: string;
+}
+
 export interface Database {
   answerKeys: { [testCode: string]: any };
   pendingKeys: PendingKey[];
   users: User[];
   submissions: Submission[];
+  auditLog: AuditLogEntry[];
   settings: {
     appealWindowDays: number;
     retentionDays: number;
@@ -63,6 +74,7 @@ const defaultDb: Database = {
     { cccd: '000000000003', name: 'Hiệu trưởng', role: 'principal' }
   ],
   submissions: [],
+  auditLog: [],
   settings: {
     appealWindowDays: 3,
     retentionDays: 15,
@@ -86,6 +98,7 @@ export function readDB(): Database {
     const db = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
     db.pendingKeys = db.pendingKeys || [];
     db.users = db.users || defaultDb.users;
+    db.auditLog = db.auditLog || [];
     
     cachedDB = db;
     lastModifiedTime = stats.mtimeMs;

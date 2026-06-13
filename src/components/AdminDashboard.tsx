@@ -34,7 +34,7 @@ export default function AdminDashboard() {
     try {
       const [keysRes, subRes, pendingRes, setRes] = await Promise.all([
         apiFetch('/api/admin/keys').then(r => r.json()),
-        apiFetch('/api/admin/submissions').then(r => r.json()),
+        apiFetch('/api/admin/submissions?page=1&limit=5000').then(r => r.json()),
         apiFetch('/api/admin/keys/pending').then(r => r.json()),
         apiFetch('/api/admin/settings').then(r => r.json()),
       ]);

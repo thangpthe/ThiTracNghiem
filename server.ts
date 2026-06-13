@@ -15,9 +15,9 @@ const app = express();
 const PORT = 3000;
 
 if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
-  console.warn('WARNING: JWT_SECRET environment variable is not set in production. Using fallback secret.');
+  throw new Error('JWT_SECRET is required in production environment.');
 }
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-fallback-secret-key-change-it-in-production-123456';
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
 
 interface RateLimitEntry { count: number, resetAt: number }
 
@@ -52,13 +52,13 @@ function createRateLimiter(maxRequests: number, windowMs: number) {
 
 const loginRateLimiter = createRateLimiter(10, 5 * 60 * 1000); // 10 attempts per 5 minutes
 const publicApiRateLimiter = createRateLimiter(200, 60 * 1000); // 200 attempts per minute for public queries
-const appealRateLimiter = createRateLimiter(10, 60 * 1000); // 10 attempts per minute for appeals
+const appealRateLimiter = createRateLimiter(50, 60 * 1000); // 50 attempts per minute for appeals
 
 // Serve uploaded images securely
 app.use('/uploads', express.static(UPLOADS_DIR));
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: '15mb' }));
+app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 
 const ai = new GoogleGenAI({ 
   apiKey: process.env.GEMINI_API_KEY,
@@ -199,6 +199,7 @@ app.get('/api/admin/keys/pending', requireRole(['admin']), (req, res) => {
 
 app.post('/api/admin/keys/approve', requireRole(['admin']), async (req, res) => {
   const { id } = req.body;
+  const adminCccd = (req as any).user.cccd;
   let success = false;
   
   await withDBLock((db) => {
@@ -206,6 +207,15 @@ app.post('/api/admin/keys/approve', requireRole(['admin']), async (req, res) => 
     if (pk) {
       pk.status = 'approved';
       db.answerKeys[pk.testCode] = pk.keyData;
+      
+      db.auditLog.push({
+        action: 'APPROVE_KEY',
+        actorCccd: adminCccd,
+        targetId: id,
+        timestamp: new Date().toISOString(),
+        details: `Approved key for test code ${pk.testCode}`
+      });
+      
       regradeSubmissions(db, pk.testCode);
       success = true;
     }
@@ -220,12 +230,22 @@ app.post('/api/admin/keys/approve', requireRole(['admin']), async (req, res) => 
 
 app.post('/api/admin/keys/reject', requireRole(['admin']), async (req, res) => {
   const { id } = req.body;
+  const adminCccd = (req as any).user.cccd;
   let success = false;
   
   await withDBLock((db) => {
     const pk = (db.pendingKeys || []).find((k: any) => k.id === id);
     if (pk) {
       pk.status = 'rejected';
+      
+      db.auditLog.push({
+        action: 'REJECT_KEY',
+        actorCccd: adminCccd,
+        targetId: id,
+        timestamp: new Date().toISOString(),
+        details: `Rejected key for test code ${pk.testCode}`
+      });
+      
       success = true;
     }
   });
@@ -325,6 +345,7 @@ app.get('/api/teacher/stats/:teacherId', requireRole(['teacher', 'principal']), 
 app.post('/api/admin/submissions/:id/edit-score', requireRole(['admin']), async (req, res) => {
   const { id } = req.params;
   const { score } = req.body;
+  const adminCccd = (req as any).user.cccd;
   
   const numericScore = Number(score);
   if (isNaN(numericScore) || numericScore < 0 || numericScore > 10) {
@@ -336,7 +357,18 @@ app.post('/api/admin/submissions/:id/edit-score', requireRole(['admin']), async 
   await withDBLock((db) => {
     const sub = db.submissions.find((s: any) => s.id === id);
     if (sub) {
+      const oldScore = sub.score;
       sub.score = numericScore;
+      
+      db.auditLog.push({
+        action: 'EDIT_SCORE',
+        actorCccd: adminCccd,
+        targetId: id,
+        timestamp: new Date().toISOString(),
+        oldValue: oldScore,
+        newValue: numericScore
+      });
+      
       success = true;
     }
   });
@@ -350,6 +382,7 @@ app.post('/api/admin/submissions/:id/edit-score', requireRole(['admin']), async 
 
 app.post('/api/admin/submissions/:id/toggle-hide', requireRole(['admin', 'teacher']), async (req, res) => {
   const { id } = req.params;
+  const actorCccd = (req as any).user.cccd;
   let isHidden = false;
   let success = false;
   
@@ -358,6 +391,16 @@ app.post('/api/admin/submissions/:id/toggle-hide', requireRole(['admin', 'teache
     if (sub) {
       sub.isHidden = !sub.isHidden;
       isHidden = sub.isHidden;
+      
+      db.auditLog.push({
+        action: 'TOGGLE_HIDE',
+        actorCccd: actorCccd,
+        targetId: id,
+        timestamp: new Date().toISOString(),
+        oldValue: !isHidden,
+        newValue: isHidden
+      });
+      
       success = true;
     }
   });
@@ -371,20 +414,47 @@ app.post('/api/admin/submissions/:id/toggle-hide', requireRole(['admin', 'teache
 
 app.get('/api/admin/submissions', requireRole(['admin', 'teacher']), (req, res) => {
   const db = readDB();
-  const summarySubmissions = db.submissions.map(s => {
+  
+  const page = parseInt(req.query.page as string) || 1;
+  const limit = parseInt(req.query.limit as string) || 50;
+  const startIndex = (page - 1) * limit;
+  const endIndex = page * limit;
+  
+  const paginatedSubmissions = db.submissions.slice(startIndex, endIndex);
+  
+  const summarySubmissions = paginatedSubmissions.map(s => {
     const { results, ...rest } = s;
     return rest;
   });
-  res.json({ success: true, submissions: summarySubmissions });
+  
+  res.json({ 
+    success: true, 
+    submissions: summarySubmissions,
+    pagination: {
+      total: db.submissions.length,
+      page,
+      limit,
+      totalPages: Math.ceil(db.submissions.length / limit)
+    }
+  });
 });
 
 app.post('/api/admin/appeal-resolve', requireRole(['admin']), async (req, res) => {
   const { id } = req.body;
+  const adminCccd = (req as any).user.cccd;
   let success = false;
   
   await withDBLock((db) => {
     const sub = db.submissions.find((s: any) => s.id === id);
     if (sub) {
+      db.auditLog.push({
+        action: 'APPEAL_RESOLVE',
+        actorCccd: adminCccd,
+        targetId: id,
+        timestamp: new Date().toISOString(),
+        oldValue: sub.status,
+        newValue: 'appeal_resolved'
+      });
       sub.status = 'appeal_resolved';
       success = true;
     }
@@ -493,6 +563,9 @@ app.post('/api/detect-orientation', requireRole(['admin', 'teacher']), async (re
     if (!imageBase64) return res.status(400).json({ error: 'Image is required' });
 
     const mimeType = imageBase64.substring(imageBase64.indexOf(":") + 1, imageBase64.indexOf(";"));
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) {
+      return res.status(400).json({ error: 'Invalid image format. Only JPEG, PNG, and WebP are allowed' });
+    }
     const base64Data = imageBase64.split(',')[1];
     
     const promptConfig = `
@@ -532,6 +605,9 @@ app.post('/api/extract-sheet', requireRole(['admin', 'teacher']), async (req, re
     if (!imageBase64) return res.status(400).json({ error: 'Image is required' });
 
     const mimeType = imageBase64.substring(imageBase64.indexOf(":") + 1, imageBase64.indexOf(";"));
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) {
+      return res.status(400).json({ error: 'Invalid image format. Only JPEG, PNG, and WebP are allowed' });
+    }
     const base64Data = imageBase64.split(',')[1];
     
     const promptConfig = `
