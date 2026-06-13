@@ -746,6 +746,7 @@ app.get('/api/public/result', publicApiRateLimiter, (req, res) => {
     return res.json({ success: false, error: 'Kết quả của bạn đang được ẩn theo yêu cầu của giáo viên.' });
   }
   
+  const db = readDB();
   // Calculate if within appeal window
   const appealTimeMs = db.settings.appealWindowDays * 24 * 60 * 60 * 1000;
   const isWithinWindow = (new Date().getTime() - new Date(sub.timestamp).getTime()) <= appealTimeMs;
