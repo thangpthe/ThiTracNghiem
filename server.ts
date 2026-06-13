@@ -70,7 +70,11 @@ function createRateLimiter(maxRequests: number, windowMs: number, keyGenerator?:
   };
 }
 
-const loginRateLimiter = createRateLimiter(10, 5 * 60 * 1000); // 10 attempts per 5 minutes
+const loginRateLimiter = createRateLimiter(30, 5 * 60 * 1000, (req) => {
+  const ip = req.ip || req.connection?.remoteAddress || 'unknown';
+  const cccd = req.body?.cccd || 'anon';
+  return `login_${ip}_${cccd}`;
+});
 const publicApiRateLimiter = createRateLimiter(200, 60 * 1000); // 200 attempts per minute for public queries
 const publicStudentIdRateLimiter = createRateLimiter(30, 5 * 60 * 1000, (req) => {
   const { studentId, testCode } = req.query;
@@ -132,7 +136,7 @@ function calculateRegrades(submissions: any[], testCode: string, key: any) {
 
   for (const sub of submissions) {
     if (sub.testCode === testCode) {
-      if (sub.status !== 'graded') continue;
+      if (sub.status !== 'graded' && sub.status !== 'appeal_pending' && sub.status !== 'appeal_resolved') continue;
 
       let correctCount = 0;
       const newResults = [];
@@ -202,7 +206,7 @@ app.get('/api/admin/keys', requireRole(['admin', 'teacher', 'principal']), (req,
 });
 
 app.post('/api/admin/keys', requireRole(['admin']), async (req, res) => {
-  const { keys } = req.body;
+  const { keys, mode } = req.body;
   if (typeof keys !== 'object' || keys === null || Array.isArray(keys)) {
     return res.status(400).json({ error: 'Invalid keys format' });
   }
@@ -213,15 +217,18 @@ app.post('/api/admin/keys', requireRole(['admin']), async (req, res) => {
      if (safeK) safeKeys[safeK] = keys[k];
   }
   
-  const db_cache = readDB();
-  const allUpdates = new Map<string, any>();
-  for (const k in safeKeys) {
-    const keyUpdates = calculateRegrades(db_cache.submissions, k, safeKeys[k]);
-    for (const [id, u] of keyUpdates) allUpdates.set(id, u);
-  }
-  
   await withDBLock((db) => {
-    db.answerKeys = safeKeys;
+    if (mode === 'clear') {
+      db.answerKeys = {};
+    } else {
+      db.answerKeys = { ...db.answerKeys, ...safeKeys };
+    }
+    
+    const allUpdates = new Map<string, any>();
+    for (const k in safeKeys) {
+      const keyUpdates = calculateRegrades(db.submissions, k, safeKeys[k]);
+      for (const [id, u] of keyUpdates) allUpdates.set(id, u);
+    }
     applyUpdates(db, allUpdates);
   });
   
@@ -240,15 +247,6 @@ app.post('/api/admin/keys/approve', requireRole(['admin']), async (req, res) => 
   let success = false;
   let auditEntry: any = null;
   
-  const read_db = readDB();
-  const targetPk = (read_db.pendingKeys || []).find((k: any) => k.id === id);
-  if (!targetPk) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  
-  // Pre-calculate updates outside the lock to minimize file lock duration
-  const updates = calculateRegrades(read_db.submissions, targetPk.testCode, targetPk.keyData);
-  
   await withDBLock((db) => {
     const pk = (db.pendingKeys || []).find((k: any) => k.id === id);
     if (pk) {
@@ -263,6 +261,7 @@ app.post('/api/admin/keys/approve', requireRole(['admin']), async (req, res) => 
         details: `Approved key for test code ${pk.testCode}`
       };
       
+      const updates = calculateRegrades(db.submissions, pk.testCode, pk.keyData);
       applyUpdates(db, updates);
       success = true;
     }

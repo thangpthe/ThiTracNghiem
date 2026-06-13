@@ -293,7 +293,7 @@ export default function AdminDashboard() {
                 <p className="text-sm font-medium text-neutral-800 mb-2">Đang có <span className="text-indigo-600 text-lg">{keysCount}</span> mã đề trên hệ thống</p>
                 <div className="flex gap-2 justify-center">
                   <button onClick={() => keyInputRef.current?.click()} className="px-3 py-1.5 bg-neutral-100 text-neutral-700 rounded-lg hover:bg-neutral-200 transition text-sm font-medium">Tải lên file Đáp án (.json, .txt, .csv, .docx, .xlsx)</button>
-                  <button onClick={async () => { await apiFetch('/api/admin/keys', {method:'POST', body:JSON.stringify({keys:{}}), headers:{'Content-Type':'application/json'}}); fetchState(); }} className="px-3 py-1.5 border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition text-sm font-medium">Xóa tất cả</button>
+                  <button onClick={async () => { await apiFetch('/api/admin/keys', {method:'POST', body:JSON.stringify({keys:{}, mode: 'clear'}), headers:{'Content-Type':'application/json'}}); fetchState(); }} className="px-3 py-1.5 border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition text-sm font-medium">Xóa tất cả</button>
                 </div>
             </div>
             {keyError && <p className="text-xs text-red-600 mt-1 whitespace-pre-wrap">{keyError}</p>}
