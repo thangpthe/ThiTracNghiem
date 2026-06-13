@@ -14,7 +14,10 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 
-const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
+if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
+  console.warn('WARNING: JWT_SECRET environment variable is not set in production. Using fallback secret.');
+}
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-fallback-secret-key-change-it-in-production-123456';
 
 interface RateLimitEntry { count: number, resetAt: number }
 
@@ -48,7 +51,8 @@ function createRateLimiter(maxRequests: number, windowMs: number) {
 }
 
 const loginRateLimiter = createRateLimiter(10, 5 * 60 * 1000); // 10 attempts per 5 minutes
-const publicApiRateLimiter = createRateLimiter(30, 60 * 1000); // 30 attempts per minute
+const publicApiRateLimiter = createRateLimiter(200, 60 * 1000); // 200 attempts per minute for public queries
+const appealRateLimiter = createRateLimiter(10, 60 * 1000); // 10 attempts per minute for appeals
 
 // Serve uploaded images securely
 app.use('/uploads', express.static(UPLOADS_DIR));
@@ -237,6 +241,9 @@ app.post('/api/admin/keys/reject', requireRole(['admin']), async (req, res) => {
 
 app.post('/api/teacher/keys/submit', requireRole(['teacher']), async (req, res) => {
   const { testCode, keyData, teacherId } = req.body;
+  if (typeof testCode !== 'string' || !testCode || typeof keyData !== 'object' || keyData === null) {
+    return res.status(400).json({ error: 'Invalid testCode or keyData' });
+  }
   if ((req as any).user.cccd !== teacherId) {
     return res.status(403).json({ error: 'Forbidden: teacherId mismatch' });
   }
@@ -456,17 +463,21 @@ app.post('/api/admin/parse-key', requireRole(['admin', 'teacher']), async (req, 
       ${rawText}
     `;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.1-pro-preview',
-      contents: promptConfig,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          additionalProperties: { type: Type.STRING }
+    const timeoutPromise = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('AI Request Timeout')), 30000));
+    const response: any = await Promise.race([
+      ai.models.generateContent({
+        model: 'gemini-3.1-pro-preview',
+        contents: promptConfig,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            additionalProperties: { type: Type.STRING }
+          }
         }
-      }
-    });
+      }),
+      timeoutPromise
+    ]);
 
     const parsed = JSON.parse(response.text || '{}');
     res.json({ success: true, keyDict: parsed });
@@ -491,18 +502,22 @@ app.post('/api/detect-orientation', requireRole(['admin', 'teacher']), async (re
       Only return a valid JSON object with one field 'rotationDegrees' which can only be one of: 0, 90, 180, 270.
     `;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.1-pro-preview',
-      contents: [{ text: promptConfig }, { inlineData: { mimeType: mimeType, data: base64Data } }],
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: { rotationDegrees: { type: Type.INTEGER } },
-          required: ['rotationDegrees']
+    const timeoutPromise = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('AI Request Timeout')), 30000));
+    const response: any = await Promise.race([
+      ai.models.generateContent({
+        model: 'gemini-3.1-pro-preview',
+        contents: [{ text: promptConfig }, { inlineData: { mimeType: mimeType, data: base64Data } }],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: { rotationDegrees: { type: Type.INTEGER } },
+            required: ['rotationDegrees']
+          }
         }
-      }
-    });
+      }),
+      timeoutPromise
+    ]);
 
     const parsed = JSON.parse(response.text || '{}');
     res.json({ success: true, rotationDegrees: parsed.rotationDegrees || 0 });
@@ -540,22 +555,26 @@ app.post('/api/extract-sheet', requireRole(['admin', 'teacher']), async (req, re
       Lưu ý: Chỉ trả về đoạn JSON hợp lệ như định dạng mô tả.
     `;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.1-pro-preview',
-      contents: [{ text: promptConfig }, { inlineData: { mimeType: mimeType, data: base64Data } }],
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            studentId: { type: Type.STRING },
-            testCode: { type: Type.STRING },
-            answers: { type: Type.OBJECT, additionalProperties: { type: Type.STRING } }
-          },
-          required: ['studentId', 'testCode', 'answers']
+    const timeoutPromise = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('AI Request Timeout')), 45000));
+    const response: any = await Promise.race([
+      ai.models.generateContent({
+        model: 'gemini-3.1-pro-preview',
+        contents: [{ text: promptConfig }, { inlineData: { mimeType: mimeType, data: base64Data } }],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              studentId: { type: Type.STRING },
+              testCode: { type: Type.STRING },
+              answers: { type: Type.OBJECT, additionalProperties: { type: Type.STRING } }
+            },
+            required: ['studentId', 'testCode', 'answers']
+          }
         }
-      }
-    });
+      }),
+      timeoutPromise
+    ]);
 
     const parsed = JSON.parse(response.text || '{}');
     let rawTestCode = parsed.testCode || '';
@@ -659,7 +678,7 @@ app.get('/api/public/result', publicApiRateLimiter, (req, res) => {
   res.json({ success: true, submission: sub, isWithinWindow });
 });
 
-app.post('/api/student/appeal', publicApiRateLimiter, async (req, res) => {
+app.post('/api/student/appeal', appealRateLimiter, async (req, res) => {
   const { id, reason, fullName, className } = req.body;
   let appealResolved = false;
   let updatedSub = null;
