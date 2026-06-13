@@ -84,6 +84,15 @@ let lastModifiedTime: number = 0;
 const submissionIndexCache = new Map<string, Submission>();
 const AUDIT_LOG_FILE = path.join(DATA_DIR, 'audit.log');
 
+function rebuildSubmissionIndex(db: Database) {
+  submissionIndexCache.clear();
+  for (const sub of db.submissions) {
+    if (sub.studentId && sub.testCode) {
+      submissionIndexCache.set(`${sub.studentId}_${sub.testCode}`, sub);
+    }
+  }
+}
+
 export function logAudit(entry: AuditLogEntry) {
   try {
     const line = JSON.stringify(entry) + '\n';
@@ -115,12 +124,7 @@ export function readDB(): Database {
     db.users = db.users || defaultDb.users;
     
     // Build quick lookup cache for public scores
-    submissionIndexCache.clear();
-    for (const sub of db.submissions) {
-      if (sub.studentId && sub.testCode) {
-         submissionIndexCache.set(`${sub.studentId}_${sub.testCode}`, sub);
-      }
-    }
+    rebuildSubmissionIndex(db);
     
     cachedDB = db;
     lastModifiedTime = stats.mtimeMs;
@@ -135,6 +139,7 @@ export function writeDB(db: Database) {
   fs.writeFileSync(tempFile, JSON.stringify(db));
   fs.renameSync(tempFile, DB_FILE);
   
+  rebuildSubmissionIndex(db);
   cachedDB = db;
   lastModifiedTime = fs.statSync(DB_FILE).mtimeMs;
 }
