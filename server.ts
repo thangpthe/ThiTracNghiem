@@ -201,6 +201,7 @@ app.post('/api/admin/keys/approve', requireRole(['admin']), async (req, res) => 
   const { id } = req.body;
   const adminCccd = (req as any).user.cccd;
   let success = false;
+  let auditEntry: any = null;
   
   await withDBLock((db) => {
     const pk = (db.pendingKeys || []).find((k: any) => k.id === id);
@@ -208,18 +209,20 @@ app.post('/api/admin/keys/approve', requireRole(['admin']), async (req, res) => 
       pk.status = 'approved';
       db.answerKeys[pk.testCode] = pk.keyData;
       
-      logAudit({
+      auditEntry = {
         action: 'APPROVE_KEY',
         actorCccd: adminCccd,
         targetId: id,
         timestamp: new Date().toISOString(),
         details: `Approved key for test code ${pk.testCode}`
-      });
+      };
       
       regradeSubmissions(db, pk.testCode);
       success = true;
     }
   });
+
+  if (auditEntry) logAudit(auditEntry);
 
   if (success) {
     res.json({ success: true });
@@ -232,23 +235,26 @@ app.post('/api/admin/keys/reject', requireRole(['admin']), async (req, res) => {
   const { id } = req.body;
   const adminCccd = (req as any).user.cccd;
   let success = false;
+  let auditEntry: any = null;
   
   await withDBLock((db) => {
     const pk = (db.pendingKeys || []).find((k: any) => k.id === id);
     if (pk) {
       pk.status = 'rejected';
       
-      logAudit({
+      auditEntry = {
         action: 'REJECT_KEY',
         actorCccd: adminCccd,
         targetId: id,
         timestamp: new Date().toISOString(),
         details: `Rejected key for test code ${pk.testCode}`
-      });
+      };
       
       success = true;
     }
   });
+
+  if (auditEntry) logAudit(auditEntry);
 
   if (success) {
     res.json({ success: true });
@@ -353,6 +359,7 @@ app.post('/api/admin/submissions/:id/edit-score', requireRole(['admin']), async 
   }
   
   let success = false;
+  let auditEntry: any = null;
   
   await withDBLock((db) => {
     const sub = db.submissions.find((s: any) => s.id === id);
@@ -360,18 +367,20 @@ app.post('/api/admin/submissions/:id/edit-score', requireRole(['admin']), async 
       const oldScore = sub.score;
       sub.score = numericScore;
       
-      logAudit({
+      auditEntry = {
         action: 'EDIT_SCORE',
         actorCccd: adminCccd,
         targetId: id,
         timestamp: new Date().toISOString(),
         oldValue: oldScore,
         newValue: numericScore
-      });
+      };
       
       success = true;
     }
   });
+  
+  if (auditEntry) logAudit(auditEntry);
   
   if (success) {
     res.json({ success: true });
@@ -385,6 +394,7 @@ app.post('/api/admin/submissions/:id/toggle-hide', requireRole(['admin', 'teache
   const actorCccd = (req as any).user.cccd;
   let isHidden = false;
   let success = false;
+  let auditEntry: any = null;
   
   await withDBLock((db) => {
     const sub = db.submissions.find((s: any) => s.id === id);
@@ -392,18 +402,20 @@ app.post('/api/admin/submissions/:id/toggle-hide', requireRole(['admin', 'teache
       sub.isHidden = !sub.isHidden;
       isHidden = sub.isHidden;
       
-      logAudit({
+      auditEntry = {
         action: 'TOGGLE_HIDE',
         actorCccd: actorCccd,
         targetId: id,
         timestamp: new Date().toISOString(),
         oldValue: !isHidden,
         newValue: isHidden
-      });
+      };
       
       success = true;
     }
   });
+  
+  if (auditEntry) logAudit(auditEntry);
   
   if (success) {
     res.json({ success: true, isHidden });
@@ -443,22 +455,25 @@ app.post('/api/admin/appeal-resolve', requireRole(['admin']), async (req, res) =
   const { id } = req.body;
   const adminCccd = (req as any).user.cccd;
   let success = false;
+  let auditEntry: any = null;
   
   await withDBLock((db) => {
     const sub = db.submissions.find((s: any) => s.id === id);
     if (sub) {
-      logAudit({
+      auditEntry = {
         action: 'APPEAL_RESOLVE',
         actorCccd: adminCccd,
         targetId: id,
         timestamp: new Date().toISOString(),
         oldValue: sub.status,
         newValue: 'appeal_resolved'
-      });
+      };
       sub.status = 'appeal_resolved';
       success = true;
     }
   });
+  
+  if (auditEntry) logAudit(auditEntry);
   
   if (success) {
     res.json({ success: true });

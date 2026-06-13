@@ -132,7 +132,7 @@ export function readDB(): Database {
 
 export function writeDB(db: Database) {
   const tempFile = DB_FILE + '.tmp';
-  fs.writeFileSync(tempFile, JSON.stringify(db, null, 2));
+  fs.writeFileSync(tempFile, JSON.stringify(db));
   fs.renameSync(tempFile, DB_FILE);
   
   cachedDB = db;
