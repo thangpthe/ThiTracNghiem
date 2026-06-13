@@ -22,6 +22,8 @@ export default function AdminDashboard() {
   const [keyError, setKeyError] = useState<string | null>(null);
   
   const [submissions, setSubmissions] = useState<Submission[]>([]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
   const [pendingKeys, setPendingKeys] = useState<any[]>([]);
   const [tab, setTab] = useState<'scan' | 'submissions' | 'approvals' | 'settings'>('scan');
 
@@ -32,20 +34,30 @@ export default function AdminDashboard() {
 
   const fetchState = async () => {
     try {
-      const [keysRes, subRes, pendingRes, setRes] = await Promise.all([
-        apiFetch('/api/admin/keys').then(r => r.json()),
-        apiFetch('/api/admin/submissions?page=1&limit=5000').then(r => r.json()),
-        apiFetch('/api/admin/keys/pending').then(r => r.json()),
-        apiFetch('/api/admin/settings').then(r => r.json()),
-      ]);
-      setKeysCount(Object.keys(keysRes.keys || {}).length);
-      setSubmissions(subRes.submissions || []);
-      setPendingKeys(pendingRes.pendingKeys || []);
-      setSettings(setRes.settings || { appealWindowDays: 3, retentionDays: 15 });
+      if (tab === 'scan' || tab === 'submissions') {
+        const keysRes = await apiFetch('/api/admin/keys').then(r => r.json());
+        setKeysCount(Object.keys(keysRes.keys || {}).length);
+      }
+      
+      if (tab === 'submissions') {
+        const subRes = await apiFetch(`/api/admin/submissions?page=${currentPage}&limit=50`).then(r => r.json());
+        setSubmissions(subRes.submissions || []);
+        setTotalPages(subRes.pagination?.totalPages || 1);
+      } 
+      
+      if (tab === 'approvals') {
+        const pendingRes = await apiFetch('/api/admin/keys/pending').then(r => r.json());
+        setPendingKeys(pendingRes.pendingKeys || []);
+      }
+      
+      if (tab === 'settings') {
+        const setRes = await apiFetch('/api/admin/settings').then(r => r.json());
+        setSettings(setRes.settings || { appealWindowDays: 3, retentionDays: 15 });
+      }
     } catch(e) {}
   };
 
-  useEffect(() => { fetchState(); }, [tab]);
+  useEffect(() => { fetchState(); }, [tab, currentPage]);
 
   const handleKeysUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -409,6 +421,13 @@ export default function AdminDashboard() {
               ))}
             </tbody>
           </table>
+          <div className="p-4 border-t border-neutral-100 flex items-center justify-between text-sm text-neutral-500 bg-neutral-50/50">
+            <span>Trang {currentPage} / {totalPages||1}</span>
+            <div className="flex gap-2">
+               <button disabled={currentPage <= 1} onClick={() => setCurrentPage(p => Math.max(1, p - 1))} className="px-3 py-1.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 disabled:opacity-50 font-medium transition-colors shadow-sm">Trước</button>
+               <button disabled={currentPage >= totalPages} onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} className="px-3 py-1.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 disabled:opacity-50 font-medium transition-colors shadow-sm">Sau</button>
+            </div>
+          </div>
         </div>
       </section>
       )}

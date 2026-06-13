@@ -4,7 +4,7 @@ import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
 import fs from 'fs';
-import { readDB, writeDB, cleanupOldRecords, UPLOADS_DIR } from './server/db';
+import { readDB, writeDB, cleanupOldRecords, UPLOADS_DIR, logAudit, findSubmissionIndexed } from './server/db';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import lockfile from 'proper-lockfile';
@@ -208,7 +208,7 @@ app.post('/api/admin/keys/approve', requireRole(['admin']), async (req, res) => 
       pk.status = 'approved';
       db.answerKeys[pk.testCode] = pk.keyData;
       
-      db.auditLog.push({
+      logAudit({
         action: 'APPROVE_KEY',
         actorCccd: adminCccd,
         targetId: id,
@@ -238,7 +238,7 @@ app.post('/api/admin/keys/reject', requireRole(['admin']), async (req, res) => {
     if (pk) {
       pk.status = 'rejected';
       
-      db.auditLog.push({
+      logAudit({
         action: 'REJECT_KEY',
         actorCccd: adminCccd,
         targetId: id,
@@ -360,7 +360,7 @@ app.post('/api/admin/submissions/:id/edit-score', requireRole(['admin']), async 
       const oldScore = sub.score;
       sub.score = numericScore;
       
-      db.auditLog.push({
+      logAudit({
         action: 'EDIT_SCORE',
         actorCccd: adminCccd,
         targetId: id,
@@ -392,7 +392,7 @@ app.post('/api/admin/submissions/:id/toggle-hide', requireRole(['admin', 'teache
       sub.isHidden = !sub.isHidden;
       isHidden = sub.isHidden;
       
-      db.auditLog.push({
+      logAudit({
         action: 'TOGGLE_HIDE',
         actorCccd: actorCccd,
         targetId: id,
@@ -447,7 +447,7 @@ app.post('/api/admin/appeal-resolve', requireRole(['admin']), async (req, res) =
   await withDBLock((db) => {
     const sub = db.submissions.find((s: any) => s.id === id);
     if (sub) {
-      db.auditLog.push({
+      logAudit({
         action: 'APPEAL_RESOLVE',
         actorCccd: adminCccd,
         targetId: id,
@@ -738,8 +738,7 @@ app.get('/api/public/result', publicApiRateLimiter, (req, res) => {
     return res.status(400).json({ success: false, error: 'Thiếu số báo danh hoặc mã đề' });
   }
 
-  const db = readDB();
-  const sub = db.submissions.find(s => String(s.studentId) === String(studentId) && String(s.testCode) === String(testCode));
+  const sub = findSubmissionIndexed(String(studentId), String(testCode));
   if (!sub) {
     return res.json({ success: false, error: 'Không tìm thấy kết quả cho thông tin này' });
   }

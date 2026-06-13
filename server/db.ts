@@ -58,7 +58,6 @@ export interface Database {
   pendingKeys: PendingKey[];
   users: User[];
   submissions: Submission[];
-  auditLog: AuditLogEntry[];
   settings: {
     appealWindowDays: number;
     retentionDays: number;
@@ -74,7 +73,6 @@ const defaultDb: Database = {
     { cccd: '000000000003', name: 'Hiệu trưởng', role: 'principal' }
   ],
   submissions: [],
-  auditLog: [],
   settings: {
     appealWindowDays: 3,
     retentionDays: 15,
@@ -83,6 +81,23 @@ const defaultDb: Database = {
 
 let cachedDB: Database | null = null;
 let lastModifiedTime: number = 0;
+const submissionIndexCache = new Map<string, Submission>();
+const AUDIT_LOG_FILE = path.join(DATA_DIR, 'audit.log');
+
+export function logAudit(entry: AuditLogEntry) {
+  try {
+    const line = JSON.stringify(entry) + '\n';
+    fs.appendFileSync(AUDIT_LOG_FILE, line, 'utf-8');
+  } catch (e) {
+    console.error('Failed to write audit log:', e);
+  }
+}
+
+export function findSubmissionIndexed(studentId: string, testCode: string): Submission | undefined {
+  // Ensure we have read latest before we check cache
+  readDB(); 
+  return submissionIndexCache.get(`${studentId}_${testCode}`);
+}
 
 export function readDB(): Database {
   if (!fs.existsSync(DB_FILE)) {
@@ -98,7 +113,14 @@ export function readDB(): Database {
     const db = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
     db.pendingKeys = db.pendingKeys || [];
     db.users = db.users || defaultDb.users;
-    db.auditLog = db.auditLog || [];
+    
+    // Build quick lookup cache for public scores
+    submissionIndexCache.clear();
+    for (const sub of db.submissions) {
+      if (sub.studentId && sub.testCode) {
+         submissionIndexCache.set(`${sub.studentId}_${sub.testCode}`, sub);
+      }
+    }
     
     cachedDB = db;
     lastModifiedTime = stats.mtimeMs;
