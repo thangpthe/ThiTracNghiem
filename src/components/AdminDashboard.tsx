@@ -1,10 +1,10 @@
+// @ts-ignore
 import React, { useState, useRef, useEffect } from 'react';
-import { UploadCloud, CheckCircle, FileSpreadsheet, RefreshCw, AlertCircle, Scan, Trash2, KeyRound, ImageIcon, Settings } from 'lucide-react';
+import { UploadCloud, CheckCircle, FileSpreadsheet, RefreshCw, AlertCircle, Scan, Trash2, KeyRound, ImageIcon, Settings, Eye, X, ClipboardList } from 'lucide-react';
 import { cn, exportToCSV } from '../lib/utils';
-import { apiFetch } from '../lib/api';
-import { Submission } from '../../server/db'; 
-import * as xlsx from 'xlsx';
-import mammoth from 'mammoth';
+import { apiFetch, postJson } from '../lib/api';
+import { parseKeyFiles } from '../lib/fileParser';
+import { Submission } from '../../server/db';
 
 interface QueueItem {
   id: string;
@@ -26,6 +26,7 @@ export default function AdminDashboard() {
   const [totalPages, setTotalPages] = useState(1);
   const [pendingKeys, setPendingKeys] = useState<any[]>([]);
   const [tab, setTab] = useState<'scan' | 'submissions' | 'approvals' | 'settings'>('scan');
+  const [appealDetailModal, setAppealDetailModal] = useState<Submission | null>(null);
 
   const [settings, setSettings] = useState({ appealWindowDays: 3, retentionDays: 15 });
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -73,68 +74,27 @@ export default function AdminDashboard() {
     const files = e.target.files;
     if (!files) return;
     setKeyError(null);
-    let newKeysDict: any = {};
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      try {
-        const testCode = file.name.split('.')[0];
-        if (file.name.endsWith('.json')) {
-          const text = await file.text();
-          newKeysDict[testCode] = JSON.parse(text);
-        } else {
-            let rawText = '';
-            if (file.name.endsWith('.docx')) {
-                const arrayBuffer = await file.arrayBuffer();
-                const result = await mammoth.extractRawText({ arrayBuffer });
-                rawText = result.value;
-            } else if (file.name.endsWith('.xlsx')) {
-                const arrayBuffer = await file.arrayBuffer();
-                const workbook = xlsx.read(arrayBuffer, { type: 'array' });
-                Object.keys(workbook.Sheets).forEach(sheetName => {
-                    rawText += xlsx.utils.sheet_to_csv(workbook.Sheets[sheetName]) + '\n';
-                });
-            } else if (file.name.endsWith('.csv') || file.name.endsWith('.txt')) {
-                rawText = await file.text();
-            } else {
-                throw new Error(`Unsupported type: ${file.name}`);
-            }
 
-            // Call API to parse unstructured text
-            const res = await apiFetch('/api/admin/parse-key', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ rawText })
-            });
-            const data = await res.json();
-            if (data.success && Object.keys(data.keyDict).length > 0) {
-                 newKeysDict[testCode] = data.keyDict;
-            } else {
-                 setKeyError((prev) => prev ? prev + `\nCould not extract answer key from ${file.name}` : `Could not extract answer key from ${file.name}`);
-            }
-        }
-      } catch (err: any) {
-        setKeyError((prev) => prev ? prev + `\nFailed to parse ${file.name}: ${err.message}` : `Failed to parse ${file.name}: ${err.message}`);
-      }
+    // Shared parser — eliminates ~50 lines of duplicated file-reading logic
+    const { keysDict, errors } = await parseKeyFiles(files);
+    if (errors.length > 0) setKeyError(errors.join('\n'));
+
+    if (Object.keys(keysDict).length > 0) {
+      try {
+        await postJson('/api/admin/keys', { keys: keysDict });
+        fetchState();
+      } catch (e) {}
     }
-    
-    try {
-       await apiFetch('/api/admin/keys', {
-         method: 'POST',
-         headers: { 'Content-Type': 'application/json' },
-         body: JSON.stringify({ keys: newKeysDict })
-       });
-       fetchState();
-    } catch(e) {}
     if (keyInputRef.current) keyInputRef.current.value = '';
   };
 
   const handleImagesUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
-    const newItems: QueueItem[] = Array.from(files).map((file: File, idx) => ({
+    const newItems: QueueItem[] = Array.from<File>(files).map((file: File, idx) => ({
       id: `${Date.now()}_${idx}`, file, previewUrl: URL.createObjectURL(file), status: 'idle'
     }));
-    setQueue(prev => [...prev, ...newItems]);
+    setQueue((prev: QueueItem[]) => [...prev, ...newItems]);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -147,9 +107,10 @@ export default function AdminDashboard() {
         reader.readAsDataURL(item.file);
       });
       
-      const orientRes = await apiFetch('/api/detect-orientation', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ imageBase64: base64Str }),
-      }).then(r => r.json());
+      const orientRes = await postJson<{ success: boolean; rotationDegrees: number }>(
+        '/api/detect-orientation',
+        { imageBase64: base64Str }
+      );
       
       let finalBase64 = base64Str;
       if (orientRes.success && orientRes.rotationDegrees) {
@@ -174,9 +135,10 @@ export default function AdminDashboard() {
         });
       }
 
-      const extRes = await apiFetch('/api/extract-sheet', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ imageBase64: finalBase64 }),
-      }).then(r => r.json());
+      const extRes = await postJson<{ success: boolean; error?: string; data: any }>(
+        '/api/extract-sheet',
+        { imageBase64: finalBase64 }
+      );
 
       if (!extRes.success) throw new Error(extRes.error || 'Failed');
       return { ...item, status: 'success', result: extRes.data };
@@ -200,10 +162,10 @@ export default function AdminDashboard() {
       if (item.status === 'success') {
          return executeNext();
       }
-      setQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: 'extracting' } : q));
+      setQueue((prev: QueueItem[]) => prev.map((q: QueueItem) => q.id === item.id ? { ...q, status: 'extracting' } : q));
       const updatedItem = await processFile(item);
       if (!isMountedRef.current) return;
-      setQueue(prev => prev.map(q => q.id === updatedItem.id ? updatedItem : q));
+      setQueue((prev: QueueItem[]) => prev.map((q: QueueItem) => q.id === updatedItem.id ? updatedItem : q));
       return executeNext();
     };
 
@@ -220,45 +182,161 @@ export default function AdminDashboard() {
   };
   
   const handleResolveAppeal = async (id: string) => {
-    await apiFetch('/api/admin/appeal-resolve', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
+    await postJson('/api/admin/appeal-resolve', { id });
     fetchState();
-  }
+  };
 
   const handleEditScore = async (id: string, currentScore: number) => {
     const input = prompt(`Nhập điểm mới (hiện tại: ${currentScore}):`, currentScore.toString());
     if (input === null) return;
     const score = parseFloat(input);
     if (!isNaN(score) && score >= 0 && score <= 10) {
-       await apiFetch(`/api/admin/submissions/${id}/edit-score`, { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({score}) });
-       fetchState();
+      await postJson(`/api/admin/submissions/${id}/edit-score`, { score });
+      fetchState();
     } else {
-       alert('Điểm không hợp lệ');
+      alert('Điểm không hợp lệ');
     }
   };
 
   const handleToggleHide = async (id: string) => {
-    await apiFetch(`/api/admin/submissions/${id}/toggle-hide`, { method: 'POST', headers:{'Content-Type':'application/json'} });
+    await postJson(`/api/admin/submissions/${id}/toggle-hide`);
     fetchState();
   };
 
   const handleApproveKey = async (id: string) => {
-    await apiFetch('/api/admin/keys/approve', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
+    await postJson('/api/admin/keys/approve', { id });
     fetchState();
-  }
+  };
 
   const handleRejectKey = async (id: string) => {
-    await apiFetch('/api/admin/keys/reject', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
+    await postJson('/api/admin/keys/reject', { id });
     fetchState();
-  }
+  };
 
   const handleUpdateSettings = async (e: React.FormEvent) => {
     e.preventDefault();
-    await apiFetch('/api/admin/settings', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(settings)});
+    await postJson('/api/admin/settings', settings);
     alert('Settings compiled successfully');
-  }
+  };
 
   return (
     <div className="space-y-8">
+      {/* Modal Xem Chi Tiết Phúc Khảo */}
+      {appealDetailModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{backgroundColor: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)'}}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+            {/* Header */}
+            <div className="p-5 border-b border-neutral-200 flex items-center justify-between bg-gradient-to-r from-amber-50 to-orange-50">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-amber-100 flex items-center justify-center">
+                  <ClipboardList className="w-5 h-5 text-amber-600" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-neutral-900 text-base">Chi tiết Phúc khảo</h3>
+                  <p className="text-xs text-neutral-500">SBD: <span className="font-semibold text-neutral-700">{appealDetailModal.studentId}</span> — Mã đề: <span className="font-semibold text-indigo-600">{appealDetailModal.testCode}</span></p>
+                </div>
+              </div>
+              <button onClick={() => setAppealDetailModal(null)} className="p-2 rounded-xl hover:bg-neutral-100 transition text-neutral-500">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            {/* Body */}
+            <div className="overflow-y-auto flex-1">
+              {/* Thông tin tổng quan */}
+              <div className="p-5 grid grid-cols-3 gap-3 border-b border-neutral-100">
+                <div className="bg-neutral-50 rounded-xl p-3 text-center">
+                  <p className="text-[10px] text-neutral-500 uppercase font-medium mb-1">Điểm</p>
+                  <p className="text-2xl font-bold text-neutral-900">{appealDetailModal.score.toFixed(1)}</p>
+                </div>
+                <div className="bg-emerald-50 rounded-xl p-3 text-center">
+                  <p className="text-[10px] text-emerald-600 uppercase font-medium mb-1">Đúng</p>
+                  <p className="text-2xl font-bold text-emerald-600">{appealDetailModal.correctCount}</p>
+                </div>
+                <div className="bg-neutral-50 rounded-xl p-3 text-center">
+                  <p className="text-[10px] text-neutral-500 uppercase font-medium mb-1">Tổng câu</p>
+                  <p className="text-2xl font-bold text-neutral-700">{appealDetailModal.totalQuestions}</p>
+                </div>
+              </div>
+              {/* Lý do phúc khảo */}
+              {(appealDetailModal.appealReason || appealDetailModal.appealTimestamp) && (
+                <div className="p-5 border-b border-neutral-100">
+                  <p className="text-xs font-semibold uppercase text-amber-600 mb-2 flex items-center gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5" /> Lý do phúc khảo
+                  </p>
+                  <blockquote className="bg-amber-50 border-l-4 border-amber-400 pl-4 pr-3 py-3 rounded-r-xl">
+                    <p className="text-sm text-amber-900 italic">"{appealDetailModal.appealReason || 'Không có lý do'}"</p>
+                  </blockquote>
+                  {appealDetailModal.appealTimestamp && (
+                    <p className="text-[11px] text-neutral-400 mt-2">Gửi lúc: {new Date(appealDetailModal.appealTimestamp).toLocaleString('vi-VN')}</p>
+                  )}
+                  <div className="mt-2">
+                    {appealDetailModal.status === 'appeal_pending' && (
+                      <span className="inline-flex items-center gap-1 bg-amber-100 text-amber-700 px-2.5 py-1 rounded-full text-xs font-bold">
+                        ⏳ Đang chờ giải quyết
+                      </span>
+                    )}
+                    {appealDetailModal.status === 'appeal_resolved' && (
+                      <span className="inline-flex items-center gap-1 bg-emerald-100 text-emerald-700 px-2.5 py-1 rounded-full text-xs font-bold">
+                        ✅ Đã giải quyết
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+              {/* Bảng chi tiết từng câu */}
+              {appealDetailModal.results && appealDetailModal.results.length > 0 && (
+                <div className="p-5">
+                  <p className="text-xs font-semibold uppercase text-neutral-500 mb-3">Chi tiết từng câu</p>
+                  <div className="border border-neutral-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-sm">
+                      <thead className="bg-neutral-50 text-xs uppercase text-neutral-500">
+                        <tr>
+                          <th className="px-4 py-2.5 text-left">Câu</th>
+                          <th className="px-4 py-2.5 text-center">Bài làm</th>
+                          <th className="px-4 py-2.5 text-center">Đáp án</th>
+                          <th className="px-4 py-2.5 text-center">Kết quả</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-neutral-100">
+                        {appealDetailModal.results.map((r: any, idx: number) => (
+                          <tr key={idx} className={r.isCorrect ? '' : 'bg-red-50/50'}>
+                            <td className="px-4 py-2 font-medium text-neutral-700">Câu {r.questionNumber}</td>
+                            <td className="px-4 py-2 text-center">
+                              <span className={`inline-block w-7 h-7 rounded-full text-sm font-bold flex items-center justify-center ${
+                                r.isCorrect ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'
+                              }`}>{r.extractedAnswer || '?'}</span>
+                            </td>
+                            <td className="px-4 py-2 text-center">
+                              <span className="inline-block w-7 h-7 rounded-full bg-indigo-100 text-indigo-700 text-sm font-bold flex items-center justify-center">{r.correctAnswer}</span>
+                            </td>
+                            <td className="px-4 py-2 text-center">
+                              {r.isCorrect
+                                ? <span className="text-emerald-600 text-base">✓</span>
+                                : <span className="text-red-500 text-base">✗</span>
+                              }
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+            {/* Footer */}
+            <div className="p-4 border-t border-neutral-100 bg-neutral-50/50 flex justify-between items-center">
+              {appealDetailModal.status === 'appeal_pending' && (
+                <button onClick={() => { handleResolveAppeal(appealDetailModal.id); setAppealDetailModal(null); }}
+                  className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-medium hover:bg-indigo-700 transition">
+                  Xác nhận đã giải quyết phúc khảo
+                </button>
+              )}
+              {appealDetailModal.status !== 'appeal_pending' && <span />}
+              <button onClick={() => setAppealDetailModal(null)} className="px-4 py-2 bg-neutral-200 text-neutral-700 rounded-xl text-sm font-medium hover:bg-neutral-300 transition">Đóng</button>
+            </div>
+          </div>
+        </div>
+      )}
       {fetchError && (
         <div className="bg-red-50 text-red-600 p-4 rounded-lg flex items-center gap-2 mb-4">
           <AlertCircle className="w-5 h-5 flex-shrink-0" />
@@ -273,7 +351,7 @@ export default function AdminDashboard() {
         </button>
         <button className={cn("pb-2 px-4 font-medium text-sm transition-colors flex items-center gap-2 whitespace-nowrap", tab==='submissions' ? "border-b-2 border-indigo-600 text-indigo-600" : "text-neutral-500 hover:text-neutral-700")} onClick={()=>setTab('submissions')}>
           Danh sách bài thi 
-          {submissions.filter(s => s.status==='appeal_pending').length > 0 && <span className="bg-red-500 text-white text-[10px] px-1.5 rounded-full">{submissions.filter(s => s.status==='appeal_pending').length}</span>}
+          {submissions.filter((s: Submission) => s.status==='appeal_pending').length > 0 && <span className="bg-red-500 text-white text-[10px] px-1.5 rounded-full">{submissions.filter((s: Submission) => s.status==='appeal_pending').length}</span>}
         </button>
         <button className={cn("pb-2 px-4 font-medium text-sm transition-colors whitespace-nowrap", tab==='settings' ? "border-b-2 border-indigo-600 text-indigo-600" : "text-neutral-500 hover:text-neutral-700")} onClick={()=>setTab('settings')}>Cài đặt hệ thống</button>
       </div>
@@ -345,7 +423,7 @@ export default function AdminDashboard() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100">
-                {queue.map((item) => (
+                {queue.map((item: QueueItem) => (
                   <tr key={item.id}>
                     <td className="px-4 py-3 text-center">
                       {item.status === 'success' && <CheckCircle className="w-4 h-4 text-emerald-500 inline" />}
@@ -383,7 +461,7 @@ export default function AdminDashboard() {
               </tr>
             </thead>
             <tbody className="divide-y divide-neutral-100">
-              {pendingKeys.map(k => (
+              {pendingKeys.map((k: any) => (
                 <tr key={k.id}>
                   <td className="px-4 py-3 text-xs text-neutral-500">{new Date(k.timestamp).toLocaleString('vi-VN')}</td>
                   <td className="px-4 py-3 font-semibold text-indigo-600">{k.testCode}</td>
@@ -409,7 +487,7 @@ export default function AdminDashboard() {
         <div className="p-4 border-b border-neutral-100 flex justify-between items-center bg-neutral-50/80">
           <h2 className="font-semibold text-neutral-800 text-sm">Danh sách đã chấm ({submissions.length})</h2>
           <button onClick={()=>{
-             const data = submissions.map(s => ({ SBD: s.studentId, 'Mã đề': s.testCode, 'Điểm': s.score.toFixed(1), 'Tình trạng': s.status }));
+             const data = submissions.map((s: Submission) => ({ SBD: s.studentId, 'Mã đề': s.testCode, 'Điểm': s.score.toFixed(1), 'Tình trạng': s.status }));
              exportToCSV(data, 'Tat_ca_diem.csv');
           }} className="px-3 py-1.5 bg-neutral-900 text-white text-xs font-medium rounded-lg flex items-center gap-1.5">
             <FileSpreadsheet className="w-4 h-4" /> Xuất File CSV
@@ -423,7 +501,7 @@ export default function AdminDashboard() {
               </tr>
             </thead>
             <tbody className="divide-y divide-neutral-100">
-              {submissions.map(s => (
+              {submissions.map((s: Submission) => (
                 <tr key={s.id} className={s.isHidden ? "opacity-50 grayscale bg-neutral-100/50" : ""}>
                   <td className="px-4 py-3 text-xs text-neutral-500">{new Date(s.timestamp).toLocaleString('vi-VN')}</td>
                   <td className="px-4 py-3 font-semibold">{s.studentId}</td>
@@ -440,11 +518,29 @@ export default function AdminDashboard() {
                   <td className="px-4 py-3 text-xs">
                      {s.status === 'appeal_pending' && (
                        <div className="flex flex-col gap-1 items-start">
-                         <span className="italic">"{s.appealReason}"</span>
-                         <button onClick={()=>handleResolveAppeal(s.id)} className="text-indigo-600 font-medium hover:underline">Xác nhận hoàn thành</button>
+                         <span className="italic line-clamp-2 max-w-[160px]" title={s.appealReason}>"{s.appealReason}"</span>
+                         <div className="flex flex-wrap gap-1.5 mt-0.5">
+                           <button
+                             onClick={() => setAppealDetailModal(s)}
+                             className="inline-flex items-center gap-1 px-2 py-1 bg-amber-100 text-amber-700 rounded-lg text-xs font-medium hover:bg-amber-200 transition"
+                           >
+                             <Eye className="w-3 h-3" /> Xem chi tiết
+                           </button>
+                           <button onClick={()=>handleResolveAppeal(s.id)} className="text-indigo-600 font-medium hover:underline">Xác nhận hoàn thành</button>
+                         </div>
                        </div>
                      )}
-                     {s.status === 'appeal_resolved' && <span className="text-neutral-400">Đã xong.</span>}
+                     {s.status === 'appeal_resolved' && (
+                       <div className="flex flex-col gap-1 items-start">
+                         <span className="text-neutral-400">Đã xong.</span>
+                         <button
+                           onClick={() => setAppealDetailModal(s)}
+                           className="inline-flex items-center gap-1 px-2 py-1 bg-neutral-100 text-neutral-600 rounded-lg text-xs font-medium hover:bg-neutral-200 transition"
+                         >
+                           <Eye className="w-3 h-3" /> Xem chi tiết
+                         </button>
+                       </div>
+                     )}
                      {s.status === 'graded' && <span className="text-neutral-300">-</span>}
                   </td>
                   <td className="px-4 py-3">
@@ -460,8 +556,8 @@ export default function AdminDashboard() {
           <div className="p-4 border-t border-neutral-100 flex items-center justify-between text-sm text-neutral-500 bg-neutral-50/50">
             <span>Trang {currentPage} / {totalPages||1}</span>
             <div className="flex gap-2">
-               <button disabled={currentPage <= 1} onClick={() => setCurrentPage(p => Math.max(1, p - 1))} className="px-3 py-1.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 disabled:opacity-50 font-medium transition-colors shadow-sm">Trước</button>
-               <button disabled={currentPage >= totalPages} onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} className="px-3 py-1.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 disabled:opacity-50 font-medium transition-colors shadow-sm">Sau</button>
+               <button disabled={currentPage <= 1} onClick={() => setCurrentPage((p: number) => Math.max(1, p - 1))} className="px-3 py-1.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 disabled:opacity-50 font-medium transition-colors shadow-sm">Trước</button>
+               <button disabled={currentPage >= totalPages} onClick={() => setCurrentPage((p: number) => Math.min(totalPages, p + 1))} className="px-3 py-1.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 disabled:opacity-50 font-medium transition-colors shadow-sm">Sau</button>
             </div>
           </div>
         </div>
@@ -474,12 +570,12 @@ export default function AdminDashboard() {
         <form className="space-y-4" onSubmit={handleUpdateSettings}>
           <div>
             <label className="block text-sm font-medium text-neutral-700 mb-1">Thời gian cho phép Phúc khảo (Ngày)</label>
-            <input type="number" min="0" value={settings.appealWindowDays} onChange={e => setSettings({...settings, appealWindowDays: Number(e.target.value)})} className="w-full border border-neutral-300 rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />
+            <input type="number" min="0" value={settings.appealWindowDays} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSettings({...settings, appealWindowDays: Number(e.target.value)})} className="w-full border border-neutral-300 rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />
             <p className="text-xs text-neutral-500 mt-1">Học sinh chỉ có thể gửi yêu cầu phúc khảo trong khoảng thời gian này kể từ khi bài được chấm.</p>
           </div>
           <div>
             <label className="block text-sm font-medium text-neutral-700 mb-1">Thời gian lưu trữ hệ thống (Ngày)</label>
-            <input type="number" min="1" value={settings.retentionDays} onChange={e => setSettings({...settings, retentionDays: Number(e.target.value)})} className="w-full border border-neutral-300 rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />
+            <input type="number" min="1" value={settings.retentionDays} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSettings({...settings, retentionDays: Number(e.target.value)})} className="w-full border border-neutral-300 rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />
             <p className="text-xs text-neutral-500 mt-1">Bài thi và Hình ảnh sẽ tự động bị xóa sau {settings.retentionDays} ngày để tiết kiệm dung lượng.</p>
           </div>
           <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-md text-sm font-medium hover:bg-indigo-700">Lưu cài đặt</button>
