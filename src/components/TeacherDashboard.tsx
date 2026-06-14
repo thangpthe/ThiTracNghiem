@@ -1,9 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { UploadCloud, CheckCircle, RefreshCw, AlertCircle, KeyRound, Clock, Users, BookOpen } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { apiFetch } from '../lib/api';
-import * as xlsx from 'xlsx';
-import mammoth from 'mammoth';
+import { apiFetch, postJson } from '../lib/api';
+import { parseKeyFiles } from '../lib/fileParser';
 
 export default function TeacherDashboard({ user }: { user: any }) {
   const [tab, setTab] = useState<'upload' | 'stats'>('upload');
@@ -24,7 +23,7 @@ export default function TeacherDashboard({ user }: { user: any }) {
       ]);
       setPendingKeys(histRes.pendingKeys || []);
       setStats(statRes);
-    } catch(e) {
+    } catch (e) {
       setFetchError('Lỗi kết nối tới máy chủ. Vui lòng thử lại sau.');
     }
   };
@@ -35,58 +34,19 @@ export default function TeacherDashboard({ user }: { user: any }) {
     const files = e.target.files;
     if (!files) return;
     setKeyError(null);
-    let errorAcc = '';
-    
-    for (let i = 0; i < files.length; i++) {
-       const file = files[i];
-       const testCode = file.name.split('.')[0];
-       let parsedKey: any = null;
-       
-       try {
-           if (file.name.endsWith('.json')) {
-              parsedKey = JSON.parse(await file.text());
-           } else {
-              let rawText = '';
-              if (file.name.endsWith('.docx')) {
-                  const arrayBuffer = await file.arrayBuffer();
-                  const result = await mammoth.extractRawText({ arrayBuffer });
-                  rawText = result.value;
-              } else if (file.name.endsWith('.xlsx')) {
-                  const arrayBuffer = await file.arrayBuffer();
-                  const workbook = xlsx.read(arrayBuffer, { type: 'array' });
-                  Object.keys(workbook.Sheets).forEach(sheetName => {
-                      rawText += xlsx.utils.sheet_to_csv(workbook.Sheets[sheetName]) + '\n';
-                  });
-              } else if (file.name.endsWith('.csv') || file.name.endsWith('.txt')) {
-                  rawText = await file.text();
-              }
-              
-              const res = await apiFetch('/api/admin/parse-key', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ rawText })
-              });
-              const data = await res.json();
-              if (data.success && Object.keys(data.keyDict).length > 0) {
-                   parsedKey = data.keyDict;
-              }
-           }
-           
-           if (parsedKey && Object.keys(parsedKey).length > 0) {
-              await apiFetch('/api/teacher/keys/submit', {
-                 method: 'POST',
-                 headers: { 'Content-Type': 'application/json' },
-                 body: JSON.stringify({ testCode, keyData: parsedKey, teacherId: user.cccd })
-              });
-           } else {
-              errorAcc += `\nKhông thể trích xuất đáp án từ ${file.name}`;
-           }
-       } catch(err: any) {
-           errorAcc += `\nLỗi đọc file ${file.name}: ${err.message}`;
-       }
+
+    // Shared parser — eliminates ~50 lines of duplicated file-reading logic
+    const { keysDict, errors } = await parseKeyFiles(files);
+    if (errors.length > 0) setKeyError(errors.join('\n'));
+
+    for (const [testCode, keyData] of Object.entries(keysDict)) {
+      try {
+        await postJson('/api/teacher/keys/submit', { testCode, keyData, teacherId: user.cccd });
+      } catch (err: any) {
+        setKeyError((prev) => (prev ? prev + '\n' : '') + `Lỗi gửi ${testCode}: ${err.message}`);
+      }
     }
-    
-    if (errorAcc) setKeyError(errorAcc);
+
     fetchState();
     if (keyInputRef.current) keyInputRef.current.value = '';
   };

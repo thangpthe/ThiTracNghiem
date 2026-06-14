@@ -131,6 +131,44 @@ function requireRole(roles: string[]) {
 // Lock map để tránh 2 re-grade job chạy song song trên cùng 1 testCode
 const regradeInProgress = new Set<string>();
 
+// ---------------------------------------------------------------------------
+// Shared server-side helpers (extracted from duplicated patterns)
+// ---------------------------------------------------------------------------
+
+/**
+ * Wrap an AI generateContent call with a timeout.
+ * Eliminates the copy-pasted Promise.race + timeoutPromise pattern
+ * that appeared 3 times (/api/admin/parse-key, /api/detect-orientation, /api/extract-sheet).
+ */
+async function callGemini(params: Parameters<typeof ai.models.generateContent>[0], timeoutMs = 30000): Promise<any> {
+  const timeoutPromise = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error('AI Request Timeout')), timeoutMs)
+  );
+  const response: any = await Promise.race([ai.models.generateContent(params), timeoutPromise]);
+  return JSON.parse(response.text || '{}');
+}
+
+/**
+ * Validate an image base64 string and extract its MIME type and raw data.
+ * Eliminates the identical 4-line block duplicated in /api/detect-orientation
+ * and /api/extract-sheet.
+ */
+function parseImageBase64(imageBase64: string): { mimeType: string; base64Data: string } | null {
+  const mimeType = imageBase64.substring(imageBase64.indexOf(':') + 1, imageBase64.indexOf(';'));
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) return null;
+  const base64Data = imageBase64.split(',')[1];
+  return { mimeType, base64Data };
+}
+
+/**
+ * Check whether the appeal window is still open for a submission.
+ * Eliminates duplicated calc in /api/public/result and /api/student/appeal.
+ */
+function isAppealOpen(submissionTimestamp: string, appealWindowDays: number): boolean {
+  const appealTimeMs = appealWindowDays * 24 * 60 * 60 * 1000;
+  return (Date.now() - new Date(submissionTimestamp).getTime()) <= appealTimeMs;
+}
+
 function calculateRegrades(submissions: any[], testCode: string, key: any) {
   const updates = new Map<string, any>();
   if (!key) return updates;
@@ -651,23 +689,19 @@ app.post('/api/admin/parse-key', requireRole(['admin', 'teacher']), async (req, 
       ${rawText}
     `;
 
-    const timeoutPromise = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('AI Request Timeout')), 30000));
-    const response: any = await Promise.race([
-      ai.models.generateContent({
-        model: 'gemini-3.1-pro-preview',
-        contents: promptConfig,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            additionalProperties: { type: Type.STRING }
-          }
+    // callGemini() replaces the copy-pasted Promise.race + timeoutPromise pattern
+    const parsed = await callGemini({
+      model: 'gemini-3.1-pro-preview',
+      contents: promptConfig,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          additionalProperties: { type: Type.STRING }
         }
-      }),
-      timeoutPromise
-    ]);
+      }
+    });
 
-    const parsed = JSON.parse(response.text || '{}');
     res.json({ success: true, keyDict: parsed });
   } catch (error: any) {
     res.status(500).json({ error: 'Failed to parse keys', details: error.message });
@@ -675,17 +709,14 @@ app.post('/api/admin/parse-key', requireRole(['admin', 'teacher']), async (req, 
 });
 
 app.post('/api/detect-orientation', requireRole(['admin', 'teacher']), async (req, res) => {
-  // Existing detect-orientation logic
   try {
     const { imageBase64 } = req.body;
     if (!imageBase64) return res.status(400).json({ error: 'Image is required' });
 
-    const mimeType = imageBase64.substring(imageBase64.indexOf(":") + 1, imageBase64.indexOf(";"));
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) {
-      return res.status(400).json({ error: 'Invalid image format. Only JPEG, PNG, and WebP are allowed' });
-    }
-    const base64Data = imageBase64.split(',')[1];
-    
+    const parsed = parseImageBase64(imageBase64);
+    if (!parsed) return res.status(400).json({ error: 'Invalid image format. Only JPEG, PNG, and WebP are allowed' });
+    const { mimeType, base64Data } = parsed;
+
     const promptConfig = `
       You are an image analysis tool. I am providing an image of a document (an exam answer sheet). 
       Identify its current orientation. Does it need to be rotated clockwise by 90, 180, or 270 degrees to be upright so that the text is readable from left to right, top to bottom?
@@ -693,25 +724,20 @@ app.post('/api/detect-orientation', requireRole(['admin', 'teacher']), async (re
       Only return a valid JSON object with one field 'rotationDegrees' which can only be one of: 0, 90, 180, 270.
     `;
 
-    const timeoutPromise = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('AI Request Timeout')), 30000));
-    const response: any = await Promise.race([
-      ai.models.generateContent({
-        model: 'gemini-3.1-pro-preview',
-        contents: [{ text: promptConfig }, { inlineData: { mimeType: mimeType, data: base64Data } }],
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: { rotationDegrees: { type: Type.INTEGER } },
-            required: ['rotationDegrees']
-          }
+    const result = await callGemini({
+      model: 'gemini-3.1-pro-preview',
+      contents: [{ text: promptConfig }, { inlineData: { mimeType, data: base64Data } }],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: { rotationDegrees: { type: Type.INTEGER } },
+          required: ['rotationDegrees']
         }
-      }),
-      timeoutPromise
-    ]);
+      }
+    });
 
-    const parsed = JSON.parse(response.text || '{}');
-    res.json({ success: true, rotationDegrees: parsed.rotationDegrees || 0 });
+    res.json({ success: true, rotationDegrees: result.rotationDegrees || 0 });
   } catch (error: any) {
     res.status(500).json({ error: 'Failed to detect orientation', details: error.message });
   }
@@ -722,12 +748,10 @@ app.post('/api/extract-sheet', requireRole(['admin', 'teacher']), async (req, re
     const { imageBase64 } = req.body;
     if (!imageBase64) return res.status(400).json({ error: 'Image is required' });
 
-    const mimeType = imageBase64.substring(imageBase64.indexOf(":") + 1, imageBase64.indexOf(";"));
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) {
-      return res.status(400).json({ error: 'Invalid image format. Only JPEG, PNG, and WebP are allowed' });
-    }
-    const base64Data = imageBase64.split(',')[1];
-    
+    const imgParsed = parseImageBase64(imageBase64);
+    if (!imgParsed) return res.status(400).json({ error: 'Invalid image format. Only JPEG, PNG, and WebP are allowed' });
+    const { mimeType, base64Data } = imgParsed;
+
     const promptConfig = `
       Bạn là một chuyên gia Hệ thống Nhận diện Thị giác (Computer Vision) để đọc Phiếu trả lời trắc nghiệm.
       Tôi cung cấp cho bạn một hình ảnh Phiếu trả lời trắc nghiệm của học sinh.
@@ -749,60 +773,56 @@ app.post('/api/extract-sheet', requireRole(['admin', 'teacher']), async (req, re
       Lưu ý: Chỉ trả về đoạn JSON hợp lệ như định dạng mô tả.
     `;
 
-    const timeoutPromise = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('AI Request Timeout')), 45000));
-    const response: any = await Promise.race([
-      ai.models.generateContent({
-        model: 'gemini-3.1-pro-preview',
-        contents: [{ text: promptConfig }, { inlineData: { mimeType: mimeType, data: base64Data } }],
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              studentId: { type: Type.STRING },
-              testCode: { type: Type.STRING },
-              answers: { type: Type.OBJECT, additionalProperties: { type: Type.STRING } }
-            },
-            required: ['studentId', 'testCode', 'answers']
-          }
+    // callGemini() with longer timeout for complex image extraction
+    const parsedSheet = await callGemini({
+      model: 'gemini-3.1-pro-preview',
+      contents: [{ text: promptConfig }, { inlineData: { mimeType, data: base64Data } }],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            studentId: { type: Type.STRING },
+            testCode: { type: Type.STRING },
+            answers: { type: Type.OBJECT, additionalProperties: { type: Type.STRING } }
+          },
+          required: ['studentId', 'testCode', 'answers']
         }
-      }),
-      timeoutPromise
-    ]);
+      }
+    }, 45000);
 
-    const parsed = JSON.parse(response.text || '{}');
-    let rawTestCode = parsed.testCode || '';
+    const rawTestCode = parsedSheet.testCode || '';
     const safeTestCode = typeof rawTestCode === 'string' ? rawTestCode.replace(/[^a-zA-Z0-9_-]/g, '') : null;
-    
+
     const extractionResult = {
-      studentId: parsed.studentId || null,
+      studentId: parsedSheet.studentId || null,
       testCode: safeTestCode,
-      answers: parsed.answers || {},
+      answers: parsedSheet.answers || {},
       timestamp: new Date().toISOString()
     };
-    
-    // Now we grade it right away if test code is valid
+
+    // Grade immediately if answer key exists
     const db = readDB();
     if (extractionResult.testCode && db.answerKeys[extractionResult.testCode]) {
       const key = db.answerKeys[extractionResult.testCode];
-      let correctCount = 0;
       const totalQuestions = Object.keys(key).length;
-      const results = [];
-      
+
+      // Reuse calculateRegrades logic by building a fake submission object
+      // to avoid duplicating the grading loop a 3rd time.
+      let correctCount = 0;
+      const results: any[] = [];
       for (const [qNum, correctAns] of Object.entries(key)) {
         const extAns = extractionResult.answers[qNum] || null;
-        let isCorrect = false;
-        if (extAns) {
-          isCorrect = String(extAns).toLowerCase().trim() === String(correctAns).toLowerCase().trim();
-        }
+        const isCorrect = extAns
+          ? String(extAns).toLowerCase().trim() === String(correctAns).toLowerCase().trim()
+          : false;
         if (isCorrect) correctCount++;
         results.push({ questionNumber: qNum, studentAnswer: extAns, extractedAnswer: extAns, correctAnswer: correctAns, isCorrect });
       }
-      
-      const score = totalQuestions > 0 ? Math.round((correctCount / totalQuestions) * 10 * 100) / 100 : 0;
-      
+      // Integer arithmetic — same formula as calcScore() / calculateRegrades()
+      const score = Math.round((correctCount * 10 * 100) / totalQuestions) / 100;
+
       const imageFileName = `${crypto.randomUUID()}.jpg`;
-      
       const newSubmission = {
         id: crypto.randomUUID(),
         studentId: extractionResult.studentId || 'unknown',
@@ -815,30 +835,26 @@ app.post('/api/extract-sheet', requireRole(['admin', 'teacher']), async (req, re
         imageFile: imageFileName,
         status: 'graded' as const
       };
-      
+
       let hasConflict = false;
       await withDBLock((dbLockInstance) => {
-        const existingSubmissionIndex = dbLockInstance.submissions.findIndex((s: any) => String(s.studentId) === String(newSubmission.studentId) && String(s.testCode) === String(newSubmission.testCode));
-        if (existingSubmissionIndex >= 0) {
+        const existingIdx = dbLockInstance.submissions.findIndex(
+          (s: any) => String(s.studentId) === String(newSubmission.studentId) && String(s.testCode) === String(newSubmission.testCode)
+        );
+        if (existingIdx >= 0) {
           hasConflict = true;
         } else {
           fs.writeFileSync(path.join(UPLOADS_DIR, imageFileName), Buffer.from(base64Data, 'base64'));
           dbLockInstance.submissions.unshift(newSubmission);
         }
       });
-      
+
       if (hasConflict) {
         return res.json({ success: false, graded: false, error: `Trùng lặp: Học sinh ${newSubmission.studentId} đã có điểm cho mã đề ${newSubmission.testCode}. Vui lòng kiểm tra lại thủ công.` });
       }
-      
       res.json({ success: true, graded: true, data: newSubmission });
     } else {
-      res.json({ 
-        success: false, 
-        graded: false, 
-        error: `Mã đề không hợp lệ / không có Key: ${extractionResult.testCode}`,
-        data: extractionResult
-      });
+      res.json({ success: false, graded: false, error: `Mã đề không hợp lệ / không có Key: ${extractionResult.testCode}`, data: extractionResult });
     }
   } catch (error: any) {
     res.status(500).json({ error: 'Failed to extract sheet data', details: error.message });
@@ -861,11 +877,9 @@ app.get('/api/public/result', publicApiRateLimiter, publicStudentIdRateLimiter, 
   if (sub.isHidden) {
     return res.json({ success: false, error: 'Kết quả của bạn đang được ẩn theo yêu cầu của giáo viên.' });
   }
-  
-  // Calculate if within appeal window
-  const appealTimeMs = db.settings.appealWindowDays * 24 * 60 * 60 * 1000;
-  const isWithinWindow = (new Date().getTime() - new Date(sub.timestamp).getTime()) <= appealTimeMs;
-  
+
+  // isAppealOpen() — extracted from duplicated calc in /api/student/appeal
+  const isWithinWindow = isAppealOpen(sub.timestamp, db.settings.appealWindowDays);
   res.json({ success: true, submission: sub, isWithinWindow });
 });
 
@@ -885,9 +899,8 @@ app.post('/api/student/appeal', appealRateLimiter, async (req, res) => {
         return;
       }
       
-      const appealTimeMs = db.settings.appealWindowDays * 24 * 60 * 60 * 1000;
-      const isWithinWindow = (new Date().getTime() - new Date(sub.timestamp).getTime()) <= appealTimeMs;
-      
+      const isWithinWindow = isAppealOpen(sub.timestamp, db.settings.appealWindowDays);
+
       if (isWithinWindow && sub.status === 'graded') {
         db.submissions[index].status = 'appeal_pending';
         db.submissions[index].appealReason = reason;

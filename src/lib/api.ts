@@ -13,3 +13,16 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
   }
   return response;
 }
+
+/**
+ * Shorthand for POST requests with JSON body.
+ * Eliminates repeated { method, headers, body } boilerplate.
+ */
+export async function postJson<T = any>(url: string, payload?: unknown): Promise<T> {
+  const res = await apiFetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: payload !== undefined ? JSON.stringify(payload) : undefined,
+  });
+  return res.json() as Promise<T>;
+}
